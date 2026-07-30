@@ -52,6 +52,25 @@ estimation, and metric conversion.
 | Focal-length relative error | `1.58642e-6` (`0.000159%`) |
 | Correctness-first CPU time | `614.1 s` |
 
-The current CPU implementation is an accuracy oracle, not a production
-backend. It does not advertise Vulkan or GPU residency. Batching the repeated
-encoder passes and Vulkan execution are required in the performance phase.
+## Vulkan full-graph gate
+
+ABI 2 adds `depth_pro_create_vulkan`. It executes all 37 DINOv2-L encoder
+passes, multiscale patch stitching, convolutional decoder, field-of-view head,
+and metric conversion on Vulkan. The canonical model remains the shared
+checkpoint; the runtime consumes only the bounded, content-addressed `.dpro`
+derivation and does not load pickle.
+
+The first Windows hardware canary passes on the Radeon RX 9070:
+
+| Metric | Vulkan vs Python CPU |
+|---|---:|
+| Relative depth L1 | `0.00142426` (`0.142426%`) |
+| Maximum absolute depth error | `0.0141956` |
+| Focal-length relative error | `1.98302e-6` (`0.000198%`) |
+| Model creation | `2.57 s` |
+| Full 140x140 inference | `9.12 s` |
+
+The patch encoder's block 5 and block 11 captures respectively validate at
+`2.41602e-6` and `3.33093e-6` relative L1. The Vulkan path currently uses host
+input upload and depth readback; external-resource residency is deliberately
+not advertised yet.

@@ -60,7 +60,9 @@ if(DEPTH_PRO_WITH_VULKAN)
             gelu layer_norm linear linear16 linear_half linear16_half
             prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim
-            softmax_lastdim_half)
+            softmax_lastdim_half prepare_tokens16 tokens_to_nchw
+            merge_patch concatenate bilinear_half_pixel
+            scale_inverse reciprocal_depth)
         depth_pro_compile_shader(${SHADER})
     endforeach()
 endif()
@@ -77,6 +79,8 @@ if(DEPTH_PRO_WITH_VULKAN)
         src/vulkan.cpp
         src/operators.cpp
         src/gpu_model.cpp
+        src/encoder_gpu.cpp
+        src/graph_gpu.cpp
         ${DEPTH_PRO_SHADER_HEADERS})
     target_include_directories(
         depth_pro_model PRIVATE "${DEPTH_PRO_GENERATED_DIR}")
@@ -110,9 +114,29 @@ if(BUILD_TESTING)
     add_executable(depth_pro_c_abi_smoke tests/c_abi_smoke.c)
     target_link_libraries(
         depth_pro_c_abi_smoke PRIVATE depth_pro_model)
-    add_test(
+        add_test(
         NAME depth_pro_c_abi_smoke
         COMMAND depth_pro_c_abi_smoke)
+    if(DEPTH_PRO_WITH_VULKAN)
+        add_executable(
+            depth_pro_gpu_full_graph_probe
+            tools/gpu_full_graph_probe.cpp)
+        target_link_libraries(
+            depth_pro_gpu_full_graph_probe PRIVATE depth_pro_model)
+        target_include_directories(
+            depth_pro_gpu_full_graph_probe PRIVATE include)
+        add_executable(
+            depth_pro_gpu_encoder_probe
+            tools/gpu_encoder_probe.cpp
+            src/model.cpp src/vulkan.cpp src/operators.cpp
+            src/gpu_model.cpp src/encoder_gpu.cpp
+            ${DEPTH_PRO_SHADER_HEADERS})
+        target_include_directories(
+            depth_pro_gpu_encoder_probe PRIVATE
+            include src "${DEPTH_PRO_GENERATED_DIR}")
+        target_link_libraries(
+            depth_pro_gpu_encoder_probe PRIVATE Vulkan::Vulkan)
+    endif()
 endif()
 
 if(MSVC)

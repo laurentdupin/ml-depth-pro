@@ -127,6 +127,48 @@ public:
         const VulkanBuffer& right,
         std::uint32_t count);
 
+    void prepare_tokens16(
+        VulkanBuffer& output,
+        const VulkanBuffer& image,
+        const VulkanBuffer& patch_weight,
+        const VulkanBuffer& patch_bias,
+        const VulkanBuffer& class_token,
+        const VulkanBuffer& position);
+    void tokens_to_nchw(
+        VulkanBuffer& output,
+        const VulkanBuffer& tokens,
+        std::uint32_t channels);
+    void merge_patch(
+        VulkanBuffer& output,
+        const VulkanBuffer& patch,
+        std::uint32_t channels,
+        std::uint32_t steps,
+        std::uint32_t padding,
+        std::uint32_t patch_index);
+    void concatenate(
+        VulkanBuffer& output,
+        const VulkanBuffer& first,
+        const VulkanBuffer& second,
+        std::uint32_t first_count,
+        std::uint32_t second_count);
+    void bilinear_half_pixel(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t output_width,
+        std::uint32_t output_height,
+        std::uint32_t channels);
+    void scale_inverse(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& fov,
+        std::uint32_t count);
+    void reciprocal_depth(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        std::uint32_t count);
+
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
@@ -156,6 +198,13 @@ private:
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline relu_;
+    VulkanPipeline prepare_tokens16_;
+    VulkanPipeline tokens_to_nchw_;
+    VulkanPipeline merge_patch_;
+    VulkanPipeline concatenate_;
+    VulkanPipeline bilinear_half_pixel_;
+    VulkanPipeline scale_inverse_;
+    VulkanPipeline reciprocal_depth_;
 };
 
 }  // namespace depth_pro_native

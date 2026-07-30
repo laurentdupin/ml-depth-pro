@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define DEPTH_PRO_ABI_VERSION 1u
+#define DEPTH_PRO_ABI_VERSION 2u
 
 typedef struct depth_pro_context depth_pro_context;
 
@@ -36,6 +36,14 @@ DEPTH_PRO_API const char* DEPTH_PRO_CALL depth_pro_last_error(void);
 
 DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_create(
     const char* native_model_path_utf8,
+    depth_pro_context** context);
+/*
+ * Creates a real full-graph Vulkan context on the zero-based physical-device
+ * index. Failure is reported; this function never falls back to CPU.
+ */
+DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_create_vulkan(
+    const char* native_model_path_utf8,
+    uint32_t device_index,
     depth_pro_context** context);
 DEPTH_PRO_API void DEPTH_PRO_CALL depth_pro_destroy(
     depth_pro_context* context);
@@ -58,4 +66,3 @@ DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
 #endif
 
 #endif
-

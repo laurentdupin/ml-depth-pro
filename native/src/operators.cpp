@@ -27,6 +27,13 @@
 #include "relu_spv.h"
 #include "softmax_lastdim_spv.h"
 #include "softmax_lastdim_half_spv.h"
+#include "prepare_tokens16_spv.h"
+#include "tokens_to_nchw_spv.h"
+#include "merge_patch_spv.h"
+#include "concatenate_spv.h"
+#include "bilinear_half_pixel_spv.h"
+#include "scale_inverse_spv.h"
+#include "reciprocal_depth_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -178,7 +185,28 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           },
           16)),
       relu_(context.create_pipeline(
-          dpro_relu_spv, dpro_relu_spv_size, 2, 4)) {
+          dpro_relu_spv, dpro_relu_spv_size, 2, 4)),
+      prepare_tokens16_(context.create_pipeline(
+          dpro_prepare_tokens16_spv,
+          dpro_prepare_tokens16_spv_size, 6, 0)),
+      tokens_to_nchw_(context.create_pipeline(
+          dpro_tokens_to_nchw_spv,
+          dpro_tokens_to_nchw_spv_size, 2, 4)),
+      merge_patch_(context.create_pipeline(
+          dpro_merge_patch_spv,
+          dpro_merge_patch_spv_size, 2, 16)),
+      concatenate_(context.create_pipeline(
+          dpro_concatenate_spv,
+          dpro_concatenate_spv_size, 3, 8)),
+      bilinear_half_pixel_(context.create_pipeline(
+          dpro_bilinear_half_pixel_spv,
+          dpro_bilinear_half_pixel_spv_size, 2, 20)),
+      scale_inverse_(context.create_pipeline(
+          dpro_scale_inverse_spv,
+          dpro_scale_inverse_spv_size, 3, 4)),
+      reciprocal_depth_(context.create_pipeline(
+          dpro_reciprocal_depth_spv,
+          dpro_reciprocal_depth_spv_size, 2, 4)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -212,6 +240,132 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     bilinear_align_true_image_.set_debug_name(
         "bilinear_align_true_image");
     relu_.set_debug_name("relu");
+}
+
+void VulkanOperators::prepare_tokens16(
+    VulkanBuffer& output,
+    const VulkanBuffer& image,
+    const VulkanBuffer& patch_weight,
+    const VulkanBuffer& patch_bias,
+    const VulkanBuffer& class_token,
+    const VulkanBuffer& position) {
+    require_bytes(image, std::uint64_t(3) * 384 * 384, "image");
+    require_bytes(
+        patch_weight, std::uint64_t(1024) * 3 * 16 * 16,
+        "patch weight");
+    require_bytes(patch_bias, 1024, "patch bias");
+    require_bytes(class_token, 1024, "class token");
+    require_bytes(position, std::uint64_t(577) * 1024, "position");
+    require_bytes(output, std::uint64_t(577) * 1024, "tokens");
+    context_.dispatch(
+        prepare_tokens16_,
+        {&output, &image, &patch_weight, &patch_bias,
+         &class_token, &position},
+        nullptr, 0, divide_up(1024, 8), divide_up(577, 8));
+}
+
+void VulkanOperators::tokens_to_nchw(
+    VulkanBuffer& output,
+    const VulkanBuffer& tokens,
+    std::uint32_t channels) {
+    require_bytes(tokens, std::uint64_t(577) * channels, "tokens");
+    require_bytes(output, std::uint64_t(576) * channels, "image");
+    context_.dispatch(
+        tokens_to_nchw_, {&output, &tokens},
+        &channels, sizeof(channels),
+        divide_up(channels * 576, 256));
+}
+
+void VulkanOperators::merge_patch(
+    VulkanBuffer& output,
+    const VulkanBuffer& patch,
+    std::uint32_t channels,
+    std::uint32_t steps,
+    std::uint32_t padding,
+    std::uint32_t patch_index) {
+    if (steps == 0 || padding >= 12 ||
+        patch_index >= steps * steps) {
+        throw std::invalid_argument("invalid patch merge dimensions");
+    }
+    const std::uint32_t side =
+        24 + (steps - 1) * (24 - 2 * padding);
+    require_bytes(patch, std::uint64_t(channels) * 576, "patch");
+    require_bytes(
+        output, std::uint64_t(channels) * side * side, "merge output");
+    struct Parameters {
+        std::uint32_t channels;
+        std::uint32_t steps;
+        std::uint32_t padding;
+        std::uint32_t patch_index;
+    } parameters{channels, steps, padding, patch_index};
+    context_.dispatch(
+        merge_patch_, {&output, &patch},
+        &parameters, sizeof(parameters), 3, 3, channels);
+}
+
+void VulkanOperators::concatenate(
+    VulkanBuffer& output,
+    const VulkanBuffer& first,
+    const VulkanBuffer& second,
+    std::uint32_t first_count,
+    std::uint32_t second_count) {
+    require_bytes(first, first_count, "first concat input");
+    require_bytes(second, second_count, "second concat input");
+    require_bytes(
+        output, std::uint64_t(first_count) + second_count,
+        "concat output");
+    const std::uint32_t parameters[2] = {
+        first_count, second_count};
+    context_.dispatch(
+        concatenate_, {&output, &first, &second},
+        parameters, sizeof(parameters),
+        divide_up(first_count + second_count, 256));
+}
+
+void VulkanOperators::bilinear_half_pixel(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t output_width,
+    std::uint32_t output_height,
+    std::uint32_t channels) {
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * channels,
+        "resize input");
+    require_bytes(
+        output, std::uint64_t(output_width) * output_height * channels,
+        "resize output");
+    const std::uint32_t parameters[5] = {
+        input_width, input_height, output_width, output_height, channels};
+    context_.dispatch(
+        bilinear_half_pixel_, {&output, &input},
+        parameters, sizeof(parameters),
+        divide_up(output_width, 8), divide_up(output_height, 8), channels);
+}
+
+void VulkanOperators::scale_inverse(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& fov,
+    std::uint32_t count) {
+    require_bytes(input, count, "inverse input");
+    require_bytes(output, count, "inverse output");
+    require_bytes(fov, 1, "fov");
+    context_.dispatch(
+        scale_inverse_, {&output, &input, &fov},
+        &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::reciprocal_depth(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t count) {
+    require_bytes(input, count, "inverse input");
+    require_bytes(output, count, "depth output");
+    context_.dispatch(
+        reciprocal_depth_, {&output, &input},
+        &count, sizeof(count), divide_up(count, 256));
 }
 
 void VulkanOperators::linear(

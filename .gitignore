@@ -2,4 +2,5 @@ checkpoints/
 __pycache__/
 *.py[cod]
 native/out/
+native/build*/
 native/validation/*.bin

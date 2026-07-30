@@ -2,6 +2,12 @@
 
 #include "graph_cpu.h"
 #include "model.h"
+#if defined(DEPTH_PRO_WITH_VULKAN)
+#include "gpu_model.h"
+#include "graph_gpu.h"
+#include "operators.h"
+#include "vulkan.h"
+#endif
 
 #include <algorithm>
 #include <memory>
@@ -11,6 +17,11 @@
 
 struct depth_pro_context {
     std::unique_ptr<depth_pro_native::ModelFile> model;
+#if defined(DEPTH_PRO_WITH_VULKAN)
+    std::unique_ptr<depth_pro_native::VulkanContext> vulkan;
+    std::unique_ptr<depth_pro_native::GpuModel> gpu_model;
+    std::unique_ptr<depth_pro_native::VulkanOperators> operators;
+#endif
 };
 
 namespace {
@@ -53,7 +64,45 @@ uint32_t DEPTH_PRO_CALL depth_pro_abi_version(void) {
 }
 
 const char* DEPTH_PRO_CALL depth_pro_version_string(void) {
-    return "0.1.0-cpu-full-graph";
+    return "0.2.0-cpu-vulkan-full-graph";
+}
+
+depth_pro_status DEPTH_PRO_CALL depth_pro_create_vulkan(
+    const char* path,
+    uint32_t device_index,
+    depth_pro_context** context) {
+    if (!context) {
+        return fail(
+            DEPTH_PRO_STATUS_INVALID_ARGUMENT,
+            "context output is null");
+    }
+    *context = nullptr;
+    if (!path || path[0] == '\0') {
+        return fail(
+            DEPTH_PRO_STATUS_INVALID_ARGUMENT,
+            "model path is empty");
+    }
+#if !defined(DEPTH_PRO_WITH_VULKAN)
+    (void)device_index;
+    return fail(
+        DEPTH_PRO_STATUS_INTERNAL_ERROR,
+        "this DLL was built without Vulkan");
+#else
+    return protect([&] {
+        auto result = std::make_unique<depth_pro_context>();
+        result->model =
+            std::make_unique<depth_pro_native::ModelFile>(path);
+        result->vulkan =
+            std::make_unique<depth_pro_native::VulkanContext>(device_index);
+        result->gpu_model =
+            std::make_unique<depth_pro_native::GpuModel>(
+                *result->model, *result->vulkan);
+        result->operators =
+            std::make_unique<depth_pro_native::VulkanOperators>(
+                *result->vulkan);
+        *context = result.release();
+    });
+#endif
 }
 
 const char* DEPTH_PRO_CALL depth_pro_last_error(void) {
@@ -105,6 +154,21 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
             "invalid Depth Pro tensor inference input");
     }
     return protect([&] {
+#if defined(DEPTH_PRO_WITH_VULKAN)
+        if (context->vulkan) {
+            depth_pro_native::GpuInferenceOutput result =
+                depth_pro_native::infer_gpu(
+                    *context->vulkan, *context->gpu_model,
+                    *context->operators, rgb,
+                    static_cast<std::uint32_t>(width),
+                    static_cast<std::uint32_t>(height));
+            std::copy(result.depth.begin(), result.depth.end(), depth);
+            if (focal) {
+                *focal = result.focal_length_pixels;
+            }
+            return;
+        }
+#endif
         depth_pro_native::InferenceOutput result =
             depth_pro_native::infer_cpu(
                 *context->model, rgb,
@@ -118,4 +182,3 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
 }
 
 }
-
