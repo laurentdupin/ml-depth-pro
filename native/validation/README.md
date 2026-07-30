@@ -78,3 +78,19 @@ The patch encoder's block 5 and block 11 captures respectively validate at
 `2.41602e-6` and `3.33093e-6` relative L1. The Vulkan path currently uses host
 input upload and depth readback; external-resource residency is deliberately
 not advertised yet.
+
+## InferBridge BGRA and fixed-FOV contract
+
+ABI 3 adds `depth_pro_infer_bgra8_f32`. It preserves the Python worker's
+first-three-byte BGR ordering, performs the same `[0,1]` conversion and
+`(x-0.5)/0.5` normalization, and accepts either learned FOV (`0`) or a fixed
+FOV in degrees. The default InferBridge setting passes `63`, which skips the
+entire learned FOV encoder and uses the caller's focal calibration without
+changing the canonical `.pth` to hidden `.dpro` derivation.
+
+A deterministic 32x32 BGRA canary compared fixed-63-degree output with Python
+CPU on all three Windows GPUs. Mean metric-depth relative error was `0.498%`.
+After the worker's exact `(depth-min)/(25-min)` normalization, maximum output
+deviation was `0.01061%` and mean deviation was `0.001962%` on every adapter.
+The returned focal length differed from the analytic reference by less than
+`0.00001%`. `native/tools/validate_forced_fov.py` reproduces the check.

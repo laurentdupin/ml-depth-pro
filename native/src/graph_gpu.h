@@ -19,6 +19,7 @@ GpuInferenceOutput infer_gpu(
     VulkanOperators& operators,
     const float* rgb_chw,
     std::uint32_t width,
-    std::uint32_t height);
+    std::uint32_t height,
+    float forced_fov_degrees = 0.0f);
 
 }  // namespace depth_pro_native

@@ -64,7 +64,7 @@ uint32_t DEPTH_PRO_CALL depth_pro_abi_version(void) {
 }
 
 const char* DEPTH_PRO_CALL depth_pro_version_string(void) {
-    return "0.2.0-cpu-vulkan-full-graph";
+    return "0.3.0-image-cpu-vulkan-full-graph";
 }
 
 depth_pro_status DEPTH_PRO_CALL depth_pro_create_vulkan(
@@ -174,6 +174,79 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
                 *context->model, rgb,
                 static_cast<std::uint32_t>(width),
                 static_cast<std::uint32_t>(height));
+        std::copy(result.depth.begin(), result.depth.end(), depth);
+        if (focal) {
+            *focal = result.focal_length_pixels;
+        }
+    });
+}
+
+depth_pro_status DEPTH_PRO_CALL depth_pro_infer_bgra8_f32(
+    depth_pro_context* context,
+    const uint8_t* bgra,
+    uint64_t bgra_stride_bytes,
+    int32_t width,
+    int32_t height,
+    float forced_fov_degrees,
+    float* depth,
+    uint64_t depth_elements,
+    float* focal) {
+    if (!context || !context->model || !bgra || !depth ||
+        width <= 0 || height <= 0 ||
+        bgra_stride_bytes <
+            static_cast<std::uint64_t>(width) * 4 ||
+        depth_elements <
+            static_cast<std::uint64_t>(width) * height ||
+        forced_fov_degrees < 0.0f ||
+        forced_fov_degrees >= 180.0f) {
+        return fail(
+            DEPTH_PRO_STATUS_INVALID_ARGUMENT,
+            "invalid Depth Pro BGRA image inference input");
+    }
+    return protect([&] {
+        const std::uint64_t plane =
+            static_cast<std::uint64_t>(width) * height;
+        std::vector<float> rgb(
+            static_cast<std::size_t>(3 * plane));
+        for (int32_t y = 0; y < height; ++y) {
+            const std::uint8_t* row =
+                bgra + static_cast<std::uint64_t>(y) *
+                    bgra_stride_bytes;
+            for (int32_t x = 0; x < width; ++x) {
+                const std::uint64_t pixel =
+                    static_cast<std::uint64_t>(y) * width + x;
+                for (std::uint32_t channel = 0;
+                     channel < 3; ++channel) {
+                    rgb[static_cast<std::size_t>(
+                        std::uint64_t(channel) * plane + pixel)] =
+                        row[static_cast<std::uint64_t>(x) * 4 +
+                            channel] /
+                        255.0f;
+                }
+            }
+        }
+#if defined(DEPTH_PRO_WITH_VULKAN)
+        if (context->vulkan) {
+            depth_pro_native::GpuInferenceOutput result =
+                depth_pro_native::infer_gpu(
+                    *context->vulkan, *context->gpu_model,
+                    *context->operators, rgb.data(),
+                    static_cast<std::uint32_t>(width),
+                    static_cast<std::uint32_t>(height),
+                    forced_fov_degrees);
+            std::copy(result.depth.begin(), result.depth.end(), depth);
+            if (focal) {
+                *focal = result.focal_length_pixels;
+            }
+            return;
+        }
+#endif
+        depth_pro_native::InferenceOutput result =
+            depth_pro_native::infer_cpu(
+                *context->model, rgb.data(),
+                static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height),
+                forced_fov_degrees);
         std::copy(result.depth.begin(), result.depth.end(), depth);
         if (focal) {
             *focal = result.focal_length_pixels;

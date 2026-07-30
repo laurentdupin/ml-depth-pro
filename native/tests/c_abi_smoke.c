@@ -11,7 +11,10 @@ int main(void) {
         depth_pro_create(0, &context) ==
         DEPTH_PRO_STATUS_INVALID_ARGUMENT);
     assert(context == 0);
+    assert(
+        depth_pro_infer_bgra8_f32(
+            0, 0, 0, 0, 0, 0.0f, 0, 0, 0) ==
+        DEPTH_PRO_STATUS_INVALID_ARGUMENT);
     depth_pro_destroy(0);
     return 0;
 }
-

@@ -290,7 +290,8 @@ GpuInferenceOutput infer_gpu(
     VulkanOperators& operators,
     const float* rgb,
     std::uint32_t width,
-    std::uint32_t height) {
+    std::uint32_t height,
+    float forced_fov_degrees) {
     if (!rgb || width == 0 || height == 0) {
         throw std::invalid_argument("invalid Depth Pro GPU image");
     }
@@ -462,12 +463,19 @@ GpuInferenceOutput infer_gpu(
         "head.4.weight", "head.4.bias", 1, 0);
     relu(operators, path);
 
+    Feature fov;
+    if (forced_fov_degrees > 0.0f &&
+        forced_fov_degrees < 180.0f) {
+        fov = Feature{
+            context.create_device_buffer(sizeof(float)), 1, 1, 1};
+        context.upload(
+            fov.buffer, &forced_fov_degrees, sizeof(float));
+    } else {
     GpuEncoderOutput fov_encoded = encoder_gpu(
         context, model, operators, "fov.encoder.0.", patch);
     Feature fov_tokens{
         context.create_device_buffer(
             elements(128, 24, 24) * sizeof(float)), 128, 24, 24};
-    Feature fov;
     VulkanBuffer fov_projected = context.create_device_buffer(
         std::uint64_t(577) * 128 * sizeof(float));
     operators.linear(
@@ -496,6 +504,7 @@ GpuInferenceOutput infer_gpu(
     fov = conv(
         context, model, operators, zero, fov,
         "fov.head.4.weight", "fov.head.4.bias", 1, 0);
+    }
 
     Feature scaled{
         context.create_device_buffer(

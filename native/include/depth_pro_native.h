@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define DEPTH_PRO_ABI_VERSION 2u
+#define DEPTH_PRO_ABI_VERSION 3u
 
 typedef struct depth_pro_context depth_pro_context;
 
@@ -57,6 +57,23 @@ DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
     const float* rgb_chw,
     int32_t width,
     int32_t height,
+    float* depth_hw,
+    uint64_t depth_elements,
+    float* focal_length_pixels);
+
+/*
+ * Complete InferBridge capture path. The worker passes the first three BGRA
+ * bytes directly through ToTensor, so their BGR ordering is intentionally
+ * preserved. forced_fov_degrees in (0,180) matches FovEstimation=NO and skips
+ * the learned FOV branch; zero enables learned FOV estimation.
+ */
+DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_infer_bgra8_f32(
+    depth_pro_context* context,
+    const uint8_t* bgra,
+    uint64_t bgra_stride_bytes,
+    int32_t width,
+    int32_t height,
+    float forced_fov_degrees,
     float* depth_hw,
     uint64_t depth_elements,
     float* focal_length_pixels);

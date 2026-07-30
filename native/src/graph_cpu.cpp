@@ -482,7 +482,8 @@ InferenceOutput infer_cpu(
     const ModelFile& model,
     const float* rgb,
     std::uint32_t width,
-    std::uint32_t height) {
+    std::uint32_t height,
+    float forced_fov_degrees) {
     if (!rgb || width == 0 || height == 0) {
         throw std::invalid_argument("invalid Depth Pro image");
     }
@@ -589,6 +590,8 @@ InferenceOutput infer_cpu(
         model, path, "head.4.weight", "head.4.bias", 1, 0);
     relu(inverse);
 
+    float fov_degrees = forced_fov_degrees;
+    if (!(fov_degrees > 0.0f && fov_degrees < 180.0f)) {
     const EncoderOutput fov_encoded = encoder_cpu(
         model, "fov.encoder.0.",
         x2.values.data(), 384, 384);
@@ -626,7 +629,8 @@ InferenceOutput infer_cpu(
     relu(fov);
     fov = conv(
         model, fov, "fov.head.4.weight", "fov.head.4.bias", 1, 0);
-    const float fov_degrees = fov.values[0];
+    fov_degrees = fov.values[0];
+    }
     const float focal =
         0.5f * width /
         std::tan(
