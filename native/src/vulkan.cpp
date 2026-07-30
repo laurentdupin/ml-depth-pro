@@ -2083,8 +2083,11 @@ void VulkanContext::destroy(VulkanSemaphore& semaphore) noexcept {
 
 void VulkanContext::recycle_or_destroy(
     VulkanDeferredBuffer buffer) noexcept {
+    // Depth Pro keeps several 768x768x256 feature maps live. A multi-gigabyte
+    // cache competes with those maps on 8 GiB adapters, so retain only enough
+    // scratch memory to reuse encoder and small decoder allocations.
     constexpr VkDeviceSize maximum_device_pool_bytes =
-        VkDeviceSize{2} * 1024 * 1024 * 1024;
+        VkDeviceSize{256} * 1024 * 1024;
     constexpr VkDeviceSize maximum_host_pool_bytes =
         VkDeviceSize{64} * 1024 * 1024;
     if (buffer.cacheable && buffer.buffer && buffer.memory) {

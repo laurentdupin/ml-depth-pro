@@ -60,15 +60,19 @@ and metric conversion on Vulkan. The canonical model remains the shared
 checkpoint; the runtime consumes only the bounded, content-addressed `.dpro`
 derivation and does not load pickle.
 
-The first Windows hardware canary passes on the Radeon RX 9070:
+The Windows 140x140 hardware canary passes on all three adapters. Large
+convolutions and transposed convolutions are divided into bounded spatial
+submissions, avoiding both the Windows watchdog and excess retained scratch
+memory on the 8 GiB GTX 1080.
 
-| Metric | Vulkan vs Python CPU |
-|---|---:|
-| Relative depth L1 | `0.00142426` (`0.142426%`) |
-| Maximum absolute depth error | `0.0141956` |
-| Focal-length relative error | `1.98302e-6` (`0.000198%`) |
-| Model creation | `2.57 s` |
-| Full 140x140 inference | `9.12 s` |
+| GPU | Relative depth L1 | Maximum absolute | Full inference |
+|---|---:|---:|---:|
+| Radeon RX 9070 | `0.00142426` (`0.142426%`) | `0.0141956` | `12.23 s` |
+| GeForce GTX 1080 | `0.00142439` (`0.142439%`) | `0.0141953` | `60.39 s` |
+| Radeon RX 6700 XT | `0.00142394` (`0.142394%`) | `0.0141963` | `18.42 s` |
+
+All three focal-length results have `1.98302e-6` (`0.000198%`) relative
+error. Model creation takes approximately 2.1–2.7 seconds.
 
 The patch encoder's block 5 and block 11 captures respectively validate at
 `2.41602e-6` and `3.33093e-6` relative L1. The Vulkan path currently uses host

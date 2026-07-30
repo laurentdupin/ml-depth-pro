@@ -34,11 +34,14 @@ layout(push_constant) uniform Parameters {
     uint output_channels;
     uint kernel;
     uint batches;
+    uint output_y_offset;
+    uint output_y_count;
 } parameters;
 
 void main() {
     const uint output_x = gl_GlobalInvocationID.x;
-    const uint output_y = gl_GlobalInvocationID.y;
+    const uint output_y =
+        gl_GlobalInvocationID.y + parameters.output_y_offset;
     const uint batch =
         gl_GlobalInvocationID.z / parameters.output_channels;
     const uint output_channel =
@@ -46,6 +49,7 @@ void main() {
     const uint output_width = parameters.input_width * parameters.kernel;
     const uint output_height = parameters.input_height * parameters.kernel;
     if (output_x >= output_width || output_y >= output_height ||
+        gl_GlobalInvocationID.y >= parameters.output_y_count ||
         output_channel >= parameters.output_channels ||
         batch >= parameters.batches) {
         return;

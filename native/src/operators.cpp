@@ -35,6 +35,7 @@
 #include "scale_inverse_spv.h"
 #include "reciprocal_depth_spv.h"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -151,26 +152,26 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           4,
           20)),
       conv2d_(context.create_pipeline(
-          dpro_conv2d_spv, dpro_conv2d_spv_size, 4, 48)),
+          dpro_conv2d_spv, dpro_conv2d_spv_size, 4, 56)),
       conv2d8_(context.create_pipeline(
-          dpro_conv2d8_spv, dpro_conv2d8_spv_size, 4, 48)),
+          dpro_conv2d8_spv, dpro_conv2d8_spv_size, 4, 56)),
       conv2d_half_(context.create_pipeline(
-          dpro_conv2d_half_spv, dpro_conv2d_half_spv_size, 4, 48)),
+          dpro_conv2d_half_spv, dpro_conv2d_half_spv_size, 4, 56)),
       conv2d8_half_(context.create_pipeline(
           dpro_conv2d8_half_spv,
           dpro_conv2d8_half_spv_size,
           4,
-          48)),
+          56)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dpro_conv_transpose_nonoverlap_spv,
           dpro_conv_transpose_nonoverlap_spv_size,
           4,
-          24)),
+          32)),
       conv_transpose_nonoverlap_half_(context.create_pipeline(
           dpro_conv_transpose_nonoverlap_half_spv,
           dpro_conv_transpose_nonoverlap_half_spv_size,
           4,
-          24)),
+          32)),
       bilinear_align_true_(context.create_pipeline(
           dpro_bilinear_align_true_spv,
           dpro_bilinear_align_true_spv_size,
@@ -853,26 +854,45 @@ void VulkanOperators::conv2d(
         std::uint32_t has_bias;
         std::uint32_t batches;
         std::uint32_t output_channel_blocks;
+        std::uint32_t output_y_offset;
+        std::uint32_t output_y_count;
     };
     const std::uint32_t output_channel_blocks =
         divide_up(output_channels, block8 ? 8 : 4);
-    const Parameters parameters{
-        input_width, input_height, input_channels,
-        output_width, output_height, output_channels,
-        kernel, stride, static_cast<std::int32_t>(padding),
-        has_bias ? 1u : 0u,
-        batches, output_channel_blocks,
-    };
-    context_.dispatch(
-        half_weight
-            ? (block8 ? conv2d8_half_ : conv2d_half_)
-            : (block8 ? conv2d8_ : conv2d_),
-        {&output, &input, &weight, &bias},
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        output_channel_blocks * batches);
+    const std::uint64_t work_per_row =
+        std::uint64_t(output_width) * input_channels *
+        output_channels * kernel * kernel * batches;
+    constexpr std::uint64_t maximum_work_per_submission =
+        std::uint64_t(1500) * 1000 * 1000;
+    const std::uint32_t rows_per_submission =
+        static_cast<std::uint32_t>(std::max<std::uint64_t>(
+            1, std::min<std::uint64_t>(
+                output_height,
+                maximum_work_per_submission /
+                    std::max<std::uint64_t>(work_per_row, 1))));
+    for (std::uint32_t output_y = 0;
+         output_y < output_height;
+         output_y += rows_per_submission) {
+        const std::uint32_t row_count =
+            std::min(rows_per_submission, output_height - output_y);
+        const Parameters parameters{
+            input_width, input_height, input_channels,
+            output_width, output_height, output_channels,
+            kernel, stride, static_cast<std::int32_t>(padding),
+            has_bias ? 1u : 0u,
+            batches, output_channel_blocks, output_y, row_count,
+        };
+        context_.dispatch(
+            half_weight
+                ? (block8 ? conv2d8_half_ : conv2d_half_)
+                : (block8 ? conv2d8_ : conv2d_),
+            {&output, &input, &weight, &bias},
+            &parameters,
+            sizeof(parameters),
+            divide_up(output_width, 8),
+            divide_up(row_count, 8),
+            output_channel_blocks * batches);
+    }
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(
@@ -920,19 +940,39 @@ void VulkanOperators::conv_transpose_nonoverlap(
         std::uint32_t output_channels;
         std::uint32_t kernel;
         std::uint32_t batches;
+        std::uint32_t output_y_offset;
+        std::uint32_t output_y_count;
     } parameters{
         input_width, input_height, input_channels,
-        output_channels, kernel, batches};
-    context_.dispatch(
-        half_weight
-            ? conv_transpose_nonoverlap_half_
-            : conv_transpose_nonoverlap_,
-        {&output, &input, &weight, &bias},
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        output_channels * batches);
+        output_channels, kernel, batches, 0, 0};
+    const std::uint64_t work_per_row =
+        std::uint64_t(output_width) * input_channels *
+        output_channels * batches;
+    constexpr std::uint64_t maximum_work_per_submission =
+        std::uint64_t(1500) * 1000 * 1000;
+    const std::uint32_t rows_per_submission =
+        static_cast<std::uint32_t>(std::max<std::uint64_t>(
+            1, std::min<std::uint64_t>(
+                output_height,
+                maximum_work_per_submission /
+                    std::max<std::uint64_t>(work_per_row, 1))));
+    for (std::uint32_t output_y = 0;
+         output_y < output_height;
+         output_y += rows_per_submission) {
+        parameters.output_y_offset = output_y;
+        parameters.output_y_count =
+            std::min(rows_per_submission, output_height - output_y);
+        context_.dispatch(
+            half_weight
+                ? conv_transpose_nonoverlap_half_
+                : conv_transpose_nonoverlap_,
+            {&output, &input, &weight, &bias},
+            &parameters,
+            sizeof(parameters),
+            divide_up(output_width, 8),
+            divide_up(parameters.output_y_count, 8),
+            output_channels * batches);
+    }
 }
 
 void VulkanOperators::bilinear_align_true(

@@ -379,94 +379,88 @@ GpuInferenceOutput infer_gpu(
     Feature global =
         token_image(context, operators, image_encoded.final, 1024);
 
-    context.batch([&] {
-        latent0 = project_upsample(
-            context, model, operators, zero, std::move(latent0),
-            "encoder.upsample_latent0", 3);
-        latent1 = project_upsample(
-            context, model, operators, zero, std::move(latent1),
-            "encoder.upsample_latent1", 2);
-        feature0 = project_upsample(
-            context, model, operators, zero, std::move(feature0),
-            "encoder.upsample0", 1);
-        feature1 = project_upsample(
-            context, model, operators, zero, std::move(feature1),
-            "encoder.upsample1", 1);
-        feature2 = project_upsample(
-            context, model, operators, zero, std::move(feature2),
-            "encoder.upsample2", 1);
-        global = deconv(
-            context, model, operators, zero, global,
-            "encoder.upsample_lowres.weight",
-            "encoder.upsample_lowres.bias");
-        Feature joined{
-            context.create_device_buffer(
-                elements(2048, 48, 48) * sizeof(float)),
-            2048, 48, 48};
-        const std::uint32_t feature_count =
-            static_cast<std::uint32_t>(elements(1024, 48, 48));
-        operators.concatenate(
-            joined.buffer, feature2.buffer, global.buffer,
-            feature_count, feature_count);
-        global = conv(
-            context, model, operators, zero, joined,
-            "encoder.fuse_lowres.weight",
-            "encoder.fuse_lowres.bias", 1, 0);
-    });
+    latent0 = project_upsample(
+        context, model, operators, zero, std::move(latent0),
+        "encoder.upsample_latent0", 3);
+    latent1 = project_upsample(
+        context, model, operators, zero, std::move(latent1),
+        "encoder.upsample_latent1", 2);
+    feature0 = project_upsample(
+        context, model, operators, zero, std::move(feature0),
+        "encoder.upsample0", 1);
+    feature1 = project_upsample(
+        context, model, operators, zero, std::move(feature1),
+        "encoder.upsample1", 1);
+    feature2 = project_upsample(
+        context, model, operators, zero, std::move(feature2),
+        "encoder.upsample2", 1);
+    global = deconv(
+        context, model, operators, zero, global,
+        "encoder.upsample_lowres.weight",
+        "encoder.upsample_lowres.bias");
+    Feature joined{
+        context.create_device_buffer(
+            elements(2048, 48, 48) * sizeof(float)),
+        2048, 48, 48};
+    const std::uint32_t feature_count =
+        static_cast<std::uint32_t>(elements(1024, 48, 48));
+    operators.concatenate(
+        joined.buffer, feature2.buffer, global.buffer,
+        feature_count, feature_count);
+    global = conv(
+        context, model, operators, zero, joined,
+        "encoder.fuse_lowres.weight",
+        "encoder.fuse_lowres.bias", 1, 0);
 
     Feature path;
     Feature lowres;
-    context.batch([&] {
-        path = conv(
-            context, model, operators, zero, global,
-            "decoder.convs.4.weight", "", 1, 1);
-    });
+    path = conv(
+        context, model, operators, zero, global,
+        "decoder.convs.4.weight", "", 1, 1);
     lowres = Feature{
         context.create_device_buffer(
             elements(256, 48, 48) * sizeof(float)), 256, 48, 48};
     context.copy(
         lowres.buffer, 0, path.buffer, 0,
         elements(256, 48, 48) * sizeof(float));
-    context.batch([&] {
-        path = fusion(
-            context, model, operators, zero,
-            std::move(path), nullptr, 4);
-        Feature projected = conv(
-            context, model, operators, zero, feature1,
-            "decoder.convs.3.weight", "", 1, 1);
-        path = fusion(
-            context, model, operators, zero,
-            std::move(path), &projected, 3);
-        projected = conv(
-            context, model, operators, zero, feature0,
-            "decoder.convs.2.weight", "", 1, 1);
-        path = fusion(
-            context, model, operators, zero,
-            std::move(path), &projected, 2);
-        projected = conv(
-            context, model, operators, zero, latent1,
-            "decoder.convs.1.weight", "", 1, 1);
-        path = fusion(
-            context, model, operators, zero,
-            std::move(path), &projected, 1);
-        path = fusion(
-            context, model, operators, zero,
-            std::move(path), &latent0, 0);
-        path = conv(
-            context, model, operators, zero, path,
-            "head.0.weight", "head.0.bias", 1, 1);
-        path = deconv(
-            context, model, operators, zero, path,
-            "head.1.weight", "head.1.bias");
-        path = conv(
-            context, model, operators, zero, path,
-            "head.2.weight", "head.2.bias", 1, 1);
-        relu(operators, path);
-        path = conv(
-            context, model, operators, zero, path,
-            "head.4.weight", "head.4.bias", 1, 0);
-        relu(operators, path);
-    });
+    path = fusion(
+        context, model, operators, zero,
+        std::move(path), nullptr, 4);
+    Feature projected = conv(
+        context, model, operators, zero, feature1,
+        "decoder.convs.3.weight", "", 1, 1);
+    path = fusion(
+        context, model, operators, zero,
+        std::move(path), &projected, 3);
+    projected = conv(
+        context, model, operators, zero, feature0,
+        "decoder.convs.2.weight", "", 1, 1);
+    path = fusion(
+        context, model, operators, zero,
+        std::move(path), &projected, 2);
+    projected = conv(
+        context, model, operators, zero, latent1,
+        "decoder.convs.1.weight", "", 1, 1);
+    path = fusion(
+        context, model, operators, zero,
+        std::move(path), &projected, 1);
+    path = fusion(
+        context, model, operators, zero,
+        std::move(path), &latent0, 0);
+    path = conv(
+        context, model, operators, zero, path,
+        "head.0.weight", "head.0.bias", 1, 1);
+    path = deconv(
+        context, model, operators, zero, path,
+        "head.1.weight", "head.1.bias");
+    path = conv(
+        context, model, operators, zero, path,
+        "head.2.weight", "head.2.bias", 1, 1);
+    relu(operators, path);
+    path = conv(
+        context, model, operators, zero, path,
+        "head.4.weight", "head.4.bias", 1, 0);
+    relu(operators, path);
 
     GpuEncoderOutput fov_encoded = encoder_gpu(
         context, model, operators, "fov.encoder.0.", patch);
@@ -474,36 +468,34 @@ GpuInferenceOutput infer_gpu(
         context.create_device_buffer(
             elements(128, 24, 24) * sizeof(float)), 128, 24, 24};
     Feature fov;
-    context.batch([&] {
-        VulkanBuffer projected = context.create_device_buffer(
-            std::uint64_t(577) * 128 * sizeof(float));
-        operators.linear(
-            projected, fov_encoded.final,
-            weight(model, "fov.encoder.1.weight"),
-            value(model, "fov.encoder.1.bias"),
-            577, 1024, 128, false, true, true);
-        operators.tokens_to_nchw(
-            fov_tokens.buffer, projected, 128);
-        fov = conv(
-            context, model, operators, zero, lowres,
-            "fov.downsample.0.weight",
-            "fov.downsample.0.bias", 2, 1);
-        relu(operators, fov);
-        operators.add(
-            fov.buffer, fov.buffer, fov_tokens.buffer,
-            static_cast<std::uint32_t>(elements(128, 24, 24)));
-        fov = conv(
-            context, model, operators, zero, fov,
-            "fov.head.0.weight", "fov.head.0.bias", 2, 1);
-        relu(operators, fov);
-        fov = conv(
-            context, model, operators, zero, fov,
-            "fov.head.2.weight", "fov.head.2.bias", 2, 1);
-        relu(operators, fov);
-        fov = conv(
-            context, model, operators, zero, fov,
-            "fov.head.4.weight", "fov.head.4.bias", 1, 0);
-    });
+    VulkanBuffer fov_projected = context.create_device_buffer(
+        std::uint64_t(577) * 128 * sizeof(float));
+    operators.linear(
+        fov_projected, fov_encoded.final,
+        weight(model, "fov.encoder.1.weight"),
+        value(model, "fov.encoder.1.bias"),
+        577, 1024, 128, false, true, true);
+    operators.tokens_to_nchw(
+        fov_tokens.buffer, fov_projected, 128);
+    fov = conv(
+        context, model, operators, zero, lowres,
+        "fov.downsample.0.weight",
+        "fov.downsample.0.bias", 2, 1);
+    relu(operators, fov);
+    operators.add(
+        fov.buffer, fov.buffer, fov_tokens.buffer,
+        static_cast<std::uint32_t>(elements(128, 24, 24)));
+    fov = conv(
+        context, model, operators, zero, fov,
+        "fov.head.0.weight", "fov.head.0.bias", 2, 1);
+    relu(operators, fov);
+    fov = conv(
+        context, model, operators, zero, fov,
+        "fov.head.2.weight", "fov.head.2.bias", 2, 1);
+    relu(operators, fov);
+    fov = conv(
+        context, model, operators, zero, fov,
+        "fov.head.4.weight", "fov.head.4.bias", 1, 0);
 
     Feature scaled{
         context.create_device_buffer(
