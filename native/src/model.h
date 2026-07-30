@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -40,6 +41,7 @@ public:
     const TensorView& tensor(std::string_view name) const;
     bool contains(std::string_view name) const;
     std::size_t tensor_count() const { return tensors_.size(); }
+    std::vector<std::string_view> tensor_names() const;
     const Derivation& derivation() const { return derivation_; }
 
 private:
@@ -58,4 +60,3 @@ private:
 };
 
 }  // namespace depth_pro_native
-
