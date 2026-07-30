@@ -382,8 +382,12 @@ EncoderOutput encoder_cpu(
             output.captures.push_back(state);
         }
     }
+    layer_norm(
+        state, tokens,
+        tensor(model, prefix + "norm.weight", 1),
+        tensor(model, prefix + "norm.bias", 1),
+        output.final);
     return output;
 }
 
 }  // namespace depth_pro_native
-

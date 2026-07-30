@@ -36,4 +36,22 @@ attention/MLP blocks, LayerScale, and the four Depth Pro feature taps.
 | 23 | `1.45081e-6` (`0.000145%`) | `0.00122070` |
 
 The image pyramid/merge, image and FOV encoders, decoder, and metric conversion
-remain pending.
+are now implemented through the public dependency-free DLL.
+
+## Full graph gate
+
+The 140x140 catalog canary exercises resize to 1536, 35 overlapping patch
+encodings, separate image and FOV encoders, pyramid merge/upsampling, the
+five-level convolutional decoder, canonical inverse-depth head, focal
+estimation, and metric conversion.
+
+| Metric | Native vs Python CPU |
+|---|---:|
+| Relative depth L1 | `0.00142429` (`0.142429%`) |
+| Maximum absolute depth error | `0.0141956` |
+| Focal-length relative error | `1.58642e-6` (`0.000159%`) |
+| Correctness-first CPU time | `614.1 s` |
+
+The current CPU implementation is an accuracy oracle, not a production
+backend. It does not advertise Vulkan or GPU residency. Batching the repeated
+encoder passes and Vulkan execution are required in the performance phase.
