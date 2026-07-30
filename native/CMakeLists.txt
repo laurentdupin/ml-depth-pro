@@ -73,7 +73,9 @@ add_library(depth_pro_core STATIC
     src/graph_cpu.cpp)
 target_include_directories(depth_pro_core PUBLIC src)
 
-add_library(depth_pro_model SHARED src/depth_pro.cpp)
+add_library(depth_pro_model SHARED
+    src/depth_pro.cpp
+    src/inferbridge_harness.cpp)
 if(DEPTH_PRO_WITH_VULKAN)
     target_sources(depth_pro_model PRIVATE
         src/vulkan.cpp
@@ -92,7 +94,9 @@ target_include_directories(
     depth_pro_model PUBLIC include PRIVATE src)
 target_link_libraries(depth_pro_model PRIVATE depth_pro_core)
 target_compile_definitions(
-    depth_pro_model PRIVATE DEPTH_PRO_BUILD_DLL)
+    depth_pro_model PRIVATE
+        DEPTH_PRO_BUILD_DLL
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 set_target_properties(
     depth_pro_model PROPERTIES OUTPUT_NAME depth_pro_native)
 
@@ -117,6 +121,26 @@ if(BUILD_TESTING)
         add_test(
         NAME depth_pro_c_abi_smoke
         COMMAND depth_pro_c_abi_smoke)
+    add_executable(
+        depth_pro_harness_abi_smoke tests/harness_abi_smoke.c)
+    target_link_libraries(
+        depth_pro_harness_abi_smoke PRIVATE depth_pro_model)
+    target_include_directories(
+        depth_pro_harness_abi_smoke PRIVATE include)
+    add_test(
+        NAME depth_pro_harness_abi_smoke
+        COMMAND depth_pro_harness_abi_smoke)
+    add_executable(
+        depth_pro_harness_full_graph tests/harness_full_graph.cpp)
+    target_link_libraries(
+        depth_pro_harness_full_graph PRIVATE depth_pro_model)
+    target_include_directories(
+        depth_pro_harness_full_graph PRIVATE include)
+    add_test(
+        NAME depth_pro_harness_full_graph
+        COMMAND depth_pro_harness_full_graph)
+    set_tests_properties(
+        depth_pro_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
     if(DEPTH_PRO_WITH_VULKAN)
         add_executable(
             depth_pro_gpu_full_graph_probe

@@ -94,3 +94,27 @@ After the worker's exact `(depth-min)/(25-min)` normalization, maximum output
 deviation was `0.01061%` and mean deviation was `0.001962%` on every adapter.
 The returned focal length differed from the analytic reference by less than
 `0.00001%`. `native/tools/validate_forced_fov.py` reproduces the check.
+
+## Embedded InferBridge harness
+
+The native model DLL exports `ibrh_get_api` for InferBridge harness ABI 1.0.
+It accepts the catalog's host-memory BGRA8 image, preserves
+`source_frame_id`/timestamp correlation, and returns a leased host-memory FP32
+depth image at the source dimensions. `FovEstimation` and `FovForcedValue`
+are interpreted with the same defaults as the Python template. After metric
+inference, the harness applies the worker's exact
+`(depth - depth.min()) / (25 - depth.min())` output transform.
+
+The output lease retains its allocation after the job handle is released.
+Capability probing advertises only the implemented synchronous host resource
+boundary and one in-flight job. The complete neural graph executes on the
+selected Vulkan device, but input upload and output readback remain explicit;
+external GPU-resource and cancellation capabilities are not advertised.
+
+The Windows Release build passes `depth_pro_c_abi_smoke`,
+`depth_pro_harness_abi_smoke`, and `depth_pro_harness_full_graph` with the
+canonical content-addressed `.dpro` derivative. The full-graph harness gate
+checks model loading, fixed-FOV parameters, source-size output, correlation,
+normalization, finite values, and output-lease lifetime. The direct Python
+CPU comparison was also rerun on all three GPUs: maximum worker-output
+deviation was `0.000106083` (`0.010609%` of normalized range).
