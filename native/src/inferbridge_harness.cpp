@@ -1,3 +1,4 @@
+
 #include "inferbridge_harness.h"
 
 #include "depth_pro_native.h"
@@ -65,6 +66,9 @@ struct ibrh_job {
     std::uintptr_t input_texture_handle = 0u;
     std::uintptr_t input_fence_handle = 0u;
     std::uint64_t input_fence_value = 0u;
+    std::uintptr_t output_texture_handle = 0u;
+    std::uintptr_t output_fence_handle = 0u;
+    std::uint64_t output_fence_value = 0u;
 #endif
     uint64_t source_frame_id = 0u;
     uint64_t timestamp_ns = 0u;
@@ -72,23 +76,10 @@ struct ibrh_job {
     uint32_t height = 0u;
     std::vector<float> depth;
     ~ibrh_job() {
-#if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
-        gpu_job.reset();
-        gpu_admission.reset();
-        if (input_texture_handle != 0u)
-            CloseHandle(reinterpret_cast<HANDLE>(input_texture_handle));
-        if (input_fence_handle != 0u)
-            CloseHandle(reinterpret_cast<HANDLE>(input_fence_handle));
+#if defined(DEPTH_PRO_WITH_VULKAN)
+        gpu_job.reset(); gpu_admission.reset();
 #endif
     }
-};
-
-struct ibrh_output_lease {
-    ibrh_job* job = nullptr;
-#if defined(DEPTH_PRO_WITH_VULKAN)
-    std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
-    std::shared_ptr<DepthProGpuAdmission> gpu_admission;
-#endif
 };
 
 namespace {
@@ -103,7 +94,6 @@ ibrh_result fail(
     if (runtime != nullptr) runtime->error = message;
     return result;
 }
-
 std::string copy_string(ibrh_string_view value) {
     return value.size == 0u ? std::string() :
         std::string(value.data, value.size);
@@ -245,15 +235,6 @@ void release_job(ibrh_job* job) {
 } // namespace
 
 #if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
-void close_gpu_input_handles(ibrh_job& job) noexcept {
-    const auto texture = reinterpret_cast<HANDLE>(
-        std::exchange(job.input_texture_handle, 0u));
-    const auto fence = reinterpret_cast<HANDLE>(
-        std::exchange(job.input_fence_handle, 0u));
-    if (texture != nullptr) CloseHandle(texture);
-    if (fence != nullptr) CloseHandle(fence);
-}
-
 struct DepthProGpuAdmission {
     explicit DepthProGpuAdmission(
         std::shared_ptr<std::atomic<uint32_t>> value)
@@ -295,7 +276,6 @@ public:
         if (removed) {
             job->cancel_requested.store(true);
             job->gpu_state.store(IBRH_JOB_CANCELLED);
-            close_gpu_input_handles(*job);
             release_job(job);
         }
         return removed;
@@ -330,7 +310,6 @@ private:
             }
             if (stop_requested || job->cancel_requested.load()) {
                 job->gpu_state.store(IBRH_JOB_CANCELLED);
-                close_gpu_input_handles(*job);
                 release_job(job);
                 continue;
             }
@@ -341,9 +320,12 @@ private:
                     job->height,
                     job->input_fence_handle,
                     job->input_fence_value,
+                    job->output_texture_handle,
+                    job->width, job->height,
+                    job->output_fence_handle,
+                    job->output_fence_value,
                     job->source_frame_id,
                     job->timestamp_ns});
-                close_gpu_input_handles(*job);
                 if (job->cancel_requested.load()) native->cancel();
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
@@ -353,7 +335,6 @@ private:
                     job->cancel_requested.load() ?
                         IBRH_JOB_CANCELLED : IBRH_JOB_RUNNING);
             } catch (const std::exception& error) {
-                close_gpu_input_handles(*job);
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
                     job->gpu_error = error.what();
@@ -362,7 +343,6 @@ private:
                     job->cancel_requested.load() ?
                         IBRH_JOB_CANCELLED : IBRH_JOB_FAILED);
             } catch (...) {
-                close_gpu_input_handles(*job);
                 job->gpu_state.store(IBRH_JOB_FAILED);
             }
             release_job(job);
@@ -551,212 +531,15 @@ void IBRH_CALL model_unload(ibrh_model* model) {
     delete model;
 }
 
-ibrh_result IBRH_CALL submit(
-    ibrh_model* model, size_t request_size,
-    const ibrh_submit_request* request, ibrh_job** output) {
-    if (model == nullptr || request == nullptr || output == nullptr)
-        return IBRH_ERROR_INVALID_ARGUMENT;
-    *output = nullptr;
-    if (request_size < sizeof(*request) ||
-        request->struct_size < sizeof(*request))
-        return IBRH_ERROR_STRUCT_TOO_SMALL;
-    if (request->input_count != 1u || request->inputs == nullptr)
-        return fail(
-            model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-            "Depth Pro requires exactly one BGRA8 input");
-    const ibrh_resource& input = request->inputs[0];
-    if (input.struct_size < sizeof(input))
-        return IBRH_ERROR_STRUCT_TOO_SMALL;
-    float fov = model->forced_fov_degrees;
-    if (!forced_fov(copy_string(request->parameters_json), fov, fov))
-        return fail(
-            model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-            "Depth Pro FOV parameters are invalid");
-    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
-        input.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
-        input.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
-#if !defined(DEPTH_PRO_WITH_VULKAN) || !defined(_WIN32)
-        return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-                    "Depth Pro D3D12 texture input is unavailable");
-#else
-        if (fov != model->forced_fov_degrees)
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Depth Pro GPU FOV is fixed at model load");
-        if (input.pixel_format != IBRH_PIXEL_BGRA8 ||
-            input.native_handle == 0u || input.width == 0u ||
-            input.height == 0u)
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Depth Pro D3D12 texture descriptor is invalid");
-        if (request->synchronization_count != 0u &&
-            request->synchronizations == nullptr)
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Depth Pro synchronization array is missing");
-        const ibrh_synchronization* wait = nullptr;
-        for (uint32_t index = 0u;
-             index < request->synchronization_count; ++index) {
-            const auto& candidate = request->synchronizations[index];
-            if (candidate.struct_size < sizeof(candidate))
-                return IBRH_ERROR_STRUCT_TOO_SMALL;
-            if (candidate.kind == IBRH_SYNC_D3D12_FENCE &&
-                candidate.operation == IBRH_SYNC_WAIT &&
-                candidate.native_handle_type ==
-                    IBRH_NATIVE_HANDLE_WIN32_SHARED) {
-                if (wait != nullptr)
-                    return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                                "Depth Pro received multiple wait fences");
-                wait = &candidate;
-            }
-        }
-        if (wait == nullptr || wait->native_handle == 0u)
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Depth Pro D3D12 input requires a wait fence");
-        HANDLE texture_copy = nullptr;
-        HANDLE fence_copy = nullptr;
-        const HANDLE process = GetCurrentProcess();
-        if (!DuplicateHandle(
-                process, reinterpret_cast<HANDLE>(input.native_handle),
-                process, &texture_copy, 0, FALSE,
-                DUPLICATE_SAME_ACCESS) ||
-            !DuplicateHandle(
-                process, reinterpret_cast<HANDLE>(wait->native_handle),
-                process, &fence_copy, 0, FALSE,
-                DUPLICATE_SAME_ACCESS)) {
-            if (texture_copy != nullptr) CloseHandle(texture_copy);
-            if (fence_copy != nullptr) CloseHandle(fence_copy);
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Depth Pro could not retain GPU input handles");
-        }
-        uint32_t admitted = model->gpu_admissions->load();
-        while (admitted < 3u &&
-               !model->gpu_admissions->compare_exchange_weak(
-                   admitted, admitted + 1u)) {}
-        if (admitted >= 3u) {
-            CloseHandle(texture_copy);
-            CloseHandle(fence_copy);
-            return fail(model->runtime, IBRH_ERROR_INVALID_STATE,
-                        "all Depth Pro GPU output leases are occupied");
-        }
-        auto* job = new (std::nothrow) ibrh_job();
-        if (job == nullptr) {
-            model->gpu_admissions->fetch_sub(1u);
-            CloseHandle(texture_copy);
-            CloseHandle(fence_copy);
-            return IBRH_ERROR_INTERNAL;
-        }
-        job->input_texture_handle =
-            reinterpret_cast<std::uintptr_t>(texture_copy);
-        job->input_fence_handle =
-            reinterpret_cast<std::uintptr_t>(fence_copy);
-        job->input_fence_value = wait->value;
-        job->source_frame_id = request->source_frame_id;
-        job->timestamp_ns = request->timestamp_ns;
-        job->width = input.width;
-        job->height = input.height;
-        try {
-            job->gpu_admission = std::make_shared<DepthProGpuAdmission>(
-                model->gpu_admissions);
-        } catch (...) {
-            model->gpu_admissions->fetch_sub(1u);
-            delete job;
-            return IBRH_ERROR_INTERNAL;
-        }
-        try {
-            std::lock_guard<std::mutex> lock(model->submit_mutex);
-            if (!model->external_gpu) {
-                depth_pro_destroy(model->context);
-                model->context = nullptr;
-                model->external_gpu = depth_pro_native::create_external_gpu(
-                    model->model_path, model->forced_fov_degrees,
-                    static_cast<uint32_t>(
-                        model->runtime->vulkan_device_index));
-                const auto capabilities = model->external_gpu->capabilities();
-                if (!capabilities.available ||
-                    (model->runtime->adapter_luid != 0u &&
-                     capabilities.adapter_luid != model->runtime->adapter_luid))
-                    throw std::runtime_error(
-                        "Depth Pro GPU does not match the requested LUID");
-                model->gpu_worker = std::make_shared<DepthProGpuWorker>(
-                    model->external_gpu);
-            }
-            job->gpu_worker = model->gpu_worker;
-            model->gpu_worker->enqueue(job);
-        } catch (const std::exception& error) {
-            delete job;
-            return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-                        error.what());
-        }
-        *output = job;
-        return IBRH_OK;
-#endif
-    }
-    if (request->synchronization_count != 0u)
-        return fail(
-            model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-            "Depth Pro host harness does not accept external synchronization");
-    if (input.domain != IBRH_RESOURCE_DOMAIN_HOST ||
-        input.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
-        input.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
-        input.pixel_format != IBRH_PIXEL_BGRA8 ||
-        input.native_handle == 0u || input.width == 0u ||
-        input.height == 0u || input.width > UINT32_MAX / 4u ||
-        input.row_stride_bytes < input.width * 4u ||
-        input.byte_offset > input.byte_size ||
-        input.byte_size - input.byte_offset <
-            static_cast<uint64_t>(input.row_stride_bytes) * input.height) {
-        return fail(
-            model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-            "Depth Pro harness requires a valid host BGRA8 image");
-    }
-#if defined(DEPTH_PRO_WITH_VULKAN)
-    if (model->context == nullptr)
-        return fail(model->runtime, IBRH_ERROR_INVALID_STATE,
-                    "Depth Pro model is active in GPU-resource mode");
-#endif
-    auto* job = new (std::nothrow) ibrh_job();
-    if (job == nullptr) return IBRH_ERROR_INTERNAL;
-    job->source_frame_id = request->source_frame_id;
-    job->timestamp_ns = request->timestamp_ns;
-    job->width = input.width;
-    job->height = input.height;
-    try {
-        job->depth.resize(
-            static_cast<size_t>(job->width) * job->height);
-    } catch (...) {
-        delete job;
-        return IBRH_ERROR_INTERNAL;
-    }
-    const auto* bgra = reinterpret_cast<const uint8_t*>(
-        static_cast<uintptr_t>(input.native_handle)) + input.byte_offset;
-    {
-        std::lock_guard<std::mutex> lock(model->submit_mutex);
-        float focal_length_pixels = 0.0f;
-        const depth_pro_status status = depth_pro_infer_bgra8_f32(
-            model->context,
-            bgra,
-            input.row_stride_bytes,
-            static_cast<int32_t>(input.width),
-            static_cast<int32_t>(input.height),
-            fov,
-            job->depth.data(), job->depth.size(),
-            &focal_length_pixels);
-        if (status != DEPTH_PRO_STATUS_OK) {
-            const std::string message =
-                std::string("Depth Pro inference failed: ") +
-                depth_pro_last_error();
-            delete job;
-            return fail(model->runtime, status_result(status), message);
-        }
-        const auto bounds =
-            std::minmax_element(job->depth.begin(), job->depth.end());
-        const float minimum = *bounds.first;
-        const float denominator = 25.0f - minimum;
-        for (float& value : job->depth)
-            value = (value - minimum) / denominator;
-    }
-    *output = job;
-    return IBRH_OK;
-}
+ibrh_result IBRH_CALL model_describe_io(const ibrh_model*m,size_t n,ibrh_model_io_descriptor*o){if(!m||!o)return IBRH_ERROR_INVALID_ARGUMENT;if(n<sizeof(*o))return IBRH_ERROR_STRUCT_TOO_SMALL;*o={};o->struct_size=sizeof(*o);o->api_version=IBRH_CURRENT_API_VERSION;o->input_count=o->output_count=1;return IBRH_OK;}
+ibrh_result IBRH_CALL model_get_port(const ibrh_model*m,uint32_t d,uint32_t i,size_t n,ibrh_port_descriptor*o){if(!m||!o)return IBRH_ERROR_INVALID_ARGUMENT;if(n<sizeof(*o))return IBRH_ERROR_STRUCT_TOO_SMALL;if(i||(d!=IBRH_PORT_INPUT&&d!=IBRH_PORT_OUTPUT))return IBRH_ERROR_NOT_FOUND;*o={};o->struct_size=sizeof(*o);o->api_version=IBRH_CURRENT_API_VERSION;o->direction=d;o->semantic=d==IBRH_PORT_INPUT?IBRH_SEMANTIC_IMAGE:IBRH_SEMANTIC_DEPTH;o->payload_type=d==IBRH_PORT_INPUT?IBRH_PIXEL_BGRA8:IBRH_PIXEL_DEPTH_METRIC_FLOAT32;o->pixel_format=o->payload_type;o->accepted_pixel_format_mask=1ull<<o->pixel_format;o->resource_kind=IBRH_RESOURCE_KIND_IMAGE_2D;o->depth=1;o->flags=IBRH_DESCRIPTOR_DYNAMIC_WIDTH|IBRH_DESCRIPTOR_DYNAMIC_HEIGHT;return IBRH_OK;}
+ibrh_result IBRH_CALL model_plan_outputs(const ibrh_model*m,size_t n,const ibrh_output_plan_request*r,uint32_t c,ibrh_port_descriptor*o){if(!m||!r||!o)return IBRH_ERROR_INVALID_ARGUMENT;if(n<sizeof(*r)||r->struct_size<sizeof(*r)||c<1)return IBRH_ERROR_STRUCT_TOO_SMALL;if(r->input_count!=1||!r->inputs)return IBRH_ERROR_INVALID_ARGUMENT;auto x=model_get_port(m,IBRH_PORT_OUTPUT,0,sizeof(o[0]),&o[0]);if(x!=IBRH_OK)return x;o[0].width=r->inputs[0].width;o[0].height=r->inputs[0].height;o[0].flags=0;return IBRH_OK;}
 
+ibrh_result IBRH_CALL submit(ibrh_model*model,size_t n,const ibrh_submit_request*r,ibrh_job**out){if(!model||!r||!out)return IBRH_ERROR_INVALID_ARGUMENT;*out=nullptr;if(n<sizeof(*r)||r->struct_size<sizeof(*r))return IBRH_ERROR_STRUCT_TOO_SMALL;if(r->input_count!=1||!r->inputs||r->output_count!=1||!r->outputs)return IBRH_ERROR_INVALID_ARGUMENT;const auto&s=r->inputs[0];const auto&t=r->outputs[0];const auto&i=s.resource;const auto&o=t.resource;float fov=model->forced_fov_degrees;if(!forced_fov(copy_string(r->parameters_json),fov,fov))return IBRH_ERROR_INVALID_ARGUMENT;if(!i.width||!i.height||o.width!=i.width||o.height!=i.height||o.pixel_format!=IBRH_PIXEL_DEPTH_METRIC_FLOAT32)return IBRH_ERROR_INVALID_ARGUMENT;
+#if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
+if(i.domain==IBRH_RESOURCE_DOMAIN_D3D12){if(fov!=model->forced_fov_degrees||o.domain!=IBRH_RESOURCE_DOMAIN_D3D12||i.pixel_format!=IBRH_PIXEL_BGRA8||i.native_handle_type!=IBRH_NATIVE_HANDLE_WIN32_SHARED||o.native_handle_type!=IBRH_NATIVE_HANDLE_WIN32_SHARED||s.synchronization.kind!=IBRH_SYNC_D3D12_FENCE||s.synchronization.operation!=IBRH_SYNC_WAIT||t.synchronization.kind!=IBRH_SYNC_D3D12_FENCE||t.synchronization.operation!=IBRH_SYNC_SIGNAL)return IBRH_ERROR_UNSUPPORTED_CAPABILITY;uint32_t admitted=model->gpu_admissions->load();while(admitted<3&&!model->gpu_admissions->compare_exchange_weak(admitted,admitted+1)){}if(admitted>=3)return IBRH_ERROR_INVALID_STATE;auto*j=new(std::nothrow)ibrh_job();if(!j){model->gpu_admissions->fetch_sub(1);return IBRH_ERROR_INTERNAL;}try{j->gpu_admission=std::make_shared<DepthProGpuAdmission>(model->gpu_admissions);}catch(...){model->gpu_admissions->fetch_sub(1);delete j;return IBRH_ERROR_INTERNAL;}j->input_texture_handle=i.native_handle;j->input_fence_handle=s.synchronization.native_handle;j->input_fence_value=s.synchronization.value;j->output_texture_handle=o.native_handle;j->output_fence_handle=t.synchronization.native_handle;j->output_fence_value=t.synchronization.value;j->source_frame_id=r->source_frame_id;j->timestamp_ns=r->timestamp_ns;j->width=i.width;j->height=i.height;try{std::lock_guard<std::mutex>l(model->submit_mutex);if(!model->external_gpu){depth_pro_destroy(model->context);model->context=nullptr;model->external_gpu=depth_pro_native::create_external_gpu(model->model_path,model->forced_fov_degrees,model->runtime->vulkan_device_index);model->gpu_worker=std::make_shared<DepthProGpuWorker>(model->external_gpu);}j->gpu_worker=model->gpu_worker;model->gpu_worker->enqueue(j);}catch(const std::exception&e){delete j;return fail(model->runtime,IBRH_ERROR_UNSUPPORTED_CAPABILITY,e.what());}*out=j;return IBRH_OK;}
+#endif
+if(i.domain!=IBRH_RESOURCE_DOMAIN_HOST||o.domain!=IBRH_RESOURCE_DOMAIN_HOST||i.pixel_format!=IBRH_PIXEL_BGRA8||i.native_handle_type!=IBRH_NATIVE_HANDLE_HOST_POINTER||o.native_handle_type!=IBRH_NATIVE_HANDLE_HOST_POINTER||s.synchronization.kind!=IBRH_SYNC_NONE||t.synchronization.kind!=IBRH_SYNC_NONE)return IBRH_ERROR_UNSUPPORTED_CAPABILITY;const auto*bgra=reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(i.native_handle))+i.byte_offset;auto*depth=reinterpret_cast<float*>(static_cast<uintptr_t>(o.native_handle)+o.byte_offset);float focal=0;depth_pro_status q;{std::lock_guard<std::mutex>l(model->submit_mutex);q=depth_pro_infer_bgra8_f32(model->context,bgra,i.row_stride_bytes,i.width,i.height,fov,depth,static_cast<size_t>(i.width)*i.height,&focal);}if(q!=DEPTH_PRO_STATUS_OK)return fail(model->runtime,status_result(q),depth_pro_last_error());auto*j=new(std::nothrow)ibrh_job();if(!j)return IBRH_ERROR_INTERNAL;j->source_frame_id=r->source_frame_id;j->timestamp_ns=r->timestamp_ns;j->width=i.width;j->height=i.height;*out=j;return IBRH_OK;}
 ibrh_result IBRH_CALL job_poll(
     const ibrh_job* job, size_t status_size, ibrh_job_status* status) {
     if (job == nullptr || status == nullptr)
@@ -824,108 +607,6 @@ void IBRH_CALL job_release(ibrh_job* job) {
     release_job(job);
 }
 
-ibrh_result IBRH_CALL output_acquire(
-    ibrh_job* job, uint32_t output_index, size_t descriptor_size,
-    ibrh_output_descriptor* descriptor, ibrh_output_lease** output) {
-    if (job == nullptr || descriptor == nullptr || output == nullptr)
-        return IBRH_ERROR_INVALID_ARGUMENT;
-    *output = nullptr;
-    if (descriptor_size < sizeof(*descriptor))
-        return IBRH_ERROR_STRUCT_TOO_SMALL;
-    if (output_index != 0u) return IBRH_ERROR_NOT_FOUND;
-    auto* lease = new (std::nothrow) ibrh_output_lease();
-    if (lease == nullptr) return IBRH_ERROR_INTERNAL;
-#if defined(DEPTH_PRO_WITH_VULKAN)
-    if (job->gpu_admission) {
-        std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
-        {
-            std::lock_guard<std::mutex> lock(job->gpu_mutex);
-            gpu_job = job->gpu_job;
-        }
-        if (!gpu_job) {
-            delete lease;
-            const uint32_t state = job->gpu_state.load();
-            if (state == IBRH_JOB_CANCELLED) return IBRH_ERROR_CANCELLED;
-            if (state == IBRH_JOB_FAILED) return IBRH_ERROR_INTERNAL;
-            return IBRH_ERROR_INVALID_STATE;
-        }
-        depth_pro_native::ExternalTextureOutput native{};
-        try { native = gpu_job->output(); }
-        catch (...) { delete lease; return IBRH_ERROR_CANCELLED; }
-        lease->gpu_job = std::move(gpu_job);
-        lease->gpu_admission = job->gpu_admission;
-        *descriptor = {};
-        descriptor->struct_size = sizeof(*descriptor);
-        descriptor->api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->output_index = output_index;
-        descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
-        descriptor->source_frame_id = native.source_frame_id;
-        descriptor->timestamp_ns = native.timestamp_ns;
-        descriptor->resource.struct_size = sizeof(descriptor->resource);
-        descriptor->resource.api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_D3D12;
-        descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
-        descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
-        descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
-        descriptor->resource.width = native.width;
-        descriptor->resource.height = native.height;
-        descriptor->resource.depth = 1u;
-        descriptor->resource.row_stride_bytes = native.width * sizeof(float);
-        descriptor->resource.byte_size = static_cast<uint64_t>(native.width) *
-            native.height * sizeof(float);
-        descriptor->resource.native_handle_type =
-            IBRH_NATIVE_HANDLE_WIN32_SHARED;
-        descriptor->resource.native_handle = native.shared_texture_handle;
-        descriptor->ready.struct_size = sizeof(descriptor->ready);
-        descriptor->ready.api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->ready.kind = IBRH_SYNC_D3D12_FENCE;
-        descriptor->ready.operation = IBRH_SYNC_WAIT;
-        descriptor->ready.native_handle_type =
-            IBRH_NATIVE_HANDLE_WIN32_SHARED;
-        descriptor->ready.native_handle = native.ready_fence_handle;
-        descriptor->ready.value = native.ready_fence_value;
-        *output = lease;
-        return IBRH_OK;
-    }
-#endif
-    retain_job(job);
-    lease->job = job;
-    *descriptor = {};
-    descriptor->struct_size = sizeof(*descriptor);
-    descriptor->api_version = IBRH_CURRENT_API_VERSION;
-    descriptor->output_index = 0u;
-    descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
-    descriptor->source_frame_id = job->source_frame_id;
-    descriptor->timestamp_ns = job->timestamp_ns;
-    descriptor->resource.struct_size = sizeof(descriptor->resource);
-    descriptor->resource.api_version = IBRH_CURRENT_API_VERSION;
-    descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_HOST;
-    descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
-    descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
-    descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
-    descriptor->resource.width = job->width;
-    descriptor->resource.height = job->height;
-    descriptor->resource.depth = 1u;
-    descriptor->resource.row_stride_bytes = job->width * sizeof(float);
-    descriptor->resource.byte_size = job->depth.size() * sizeof(float);
-    descriptor->resource.native_handle_type =
-        IBRH_NATIVE_HANDLE_HOST_POINTER;
-    descriptor->resource.native_handle = static_cast<uint64_t>(
-        reinterpret_cast<uintptr_t>(job->depth.data()));
-    *output = lease;
-    return IBRH_OK;
-}
-
-void IBRH_CALL output_release(ibrh_output_lease* lease) {
-    if (lease == nullptr) return;
-#if defined(DEPTH_PRO_WITH_VULKAN)
-    lease->gpu_job.reset();
-    lease->gpu_admission.reset();
-#endif
-    release_job(lease->job);
-    delete lease;
-}
-
 ibrh_result IBRH_CALL get_last_error(
     const void* object, char* destination, size_t destination_size,
     size_t* required_size) {
@@ -956,13 +637,10 @@ extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     api->runtime_create = runtime_create;
     api->runtime_destroy = runtime_destroy;
     api->model_load = model_load;
-    api->model_unload = model_unload;
-    api->submit = submit;
+    api->model_unload=model_unload;api->model_describe_io=model_describe_io;api->model_get_port=model_get_port;api->model_plan_outputs=model_plan_outputs;api->submit=submit;
     api->job_poll = job_poll;
     api->job_cancel = job_cancel;
     api->job_release = job_release;
-    api->output_acquire = output_acquire;
-    api->output_release = output_release;
     api->get_last_error = get_last_error;
     return IBRH_OK;
 }
