@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
         depth_pro_native::GpuEncoderOutput encoded =
             depth_pro_native::encoder_gpu(
                 context, model, operators,
-                "encoder.patch_encoder.", image, &debug_blocks);
+                "encoder.patch_encoder.", image, 1, &debug_blocks);
         for (std::uint32_t block_index = 0;
              block_index < debug_blocks.size(); ++block_index) {
             context.download(

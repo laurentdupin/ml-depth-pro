@@ -12,14 +12,25 @@
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
+#include "conv2d_pointwise_gemm_spv.h"
+#include "conv2d_pointwise_gemm_half_spv.h"
+#include "conv2d8_tiled_half_spv.h"
+#include "conv2d8_tiled16x8_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
+#include "conv_transpose_gemm_half_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
 #include "linear16_spv.h"
 #include "linear_half_spv.h"
 #include "linear16_half_spv.h"
+#include "linear_vec4_spv.h"
+#include "linear_vec4_half_spv.h"
+#include "linear_vec8_spv.h"
+#include "linear_vec8_half_spv.h"
+#include "linear_vec16_spv.h"
+#include "linear_vec16_half_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -86,12 +97,30 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_linear16_half_spv_size,
           4,
           12)),
+      linear_vec4_(context.create_pipeline(
+          dpro_linear_vec4_spv,
+          dpro_linear_vec4_spv_size, 4, 12)),
+      linear_vec4_half_(context.create_pipeline(
+          dpro_linear_vec4_half_spv,
+          dpro_linear_vec4_half_spv_size, 4, 12)),
+      linear_vec8_(context.create_pipeline(
+          dpro_linear_vec8_spv,
+          dpro_linear_vec8_spv_size, 4, 12)),
+      linear_vec8_half_(context.create_pipeline(
+          dpro_linear_vec8_half_spv,
+          dpro_linear_vec8_half_spv_size, 4, 12)),
+      linear_vec16_(context.create_pipeline(
+          dpro_linear_vec16_spv,
+          dpro_linear_vec16_spv_size, 4, 12)),
+      linear_vec16_half_(context.create_pipeline(
+          dpro_linear_vec16_half_spv,
+          dpro_linear_vec16_half_spv_size, 4, 12)),
       gelu_(context.create_pipeline(
-          dpro_gelu_spv, dpro_gelu_spv_size, 2, 4)),
+          dpro_gelu_spv, dpro_gelu_spv_size, 2, 8)),
       layer_norm_(context.create_pipeline(
           dpro_layer_norm_spv, dpro_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
-          dpro_add_scaled_spv, dpro_add_scaled_spv_size, 4, 8)),
+          dpro_add_scaled_spv, dpro_add_scaled_spv_size, 4, 12)),
       bmm_(context.create_pipeline(
           dpro_bmm_spv, dpro_bmm_spv_size, 3, 44)),
       bmm_score_half_(context.create_pipeline(
@@ -108,7 +137,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_softmax_lastdim_spv,
           dpro_softmax_lastdim_spv_size,
           2,
-          8)),
+          12)),
       softmax_lastdim_half_(context.create_pipeline(
           dpro_softmax_lastdim_half_spv,
           dpro_softmax_lastdim_half_spv_size,
@@ -162,6 +191,26 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_conv2d8_half_spv_size,
           4,
           56)),
+      conv2d_pointwise_gemm_(context.create_pipeline(
+          dpro_conv2d_pointwise_gemm_spv,
+          dpro_conv2d_pointwise_gemm_spv_size,
+          4,
+          56)),
+      conv2d_pointwise_gemm_half_(context.create_pipeline(
+          dpro_conv2d_pointwise_gemm_half_spv,
+          dpro_conv2d_pointwise_gemm_half_spv_size,
+          4,
+          56)),
+      conv2d8_tiled_half_(context.create_pipeline(
+          dpro_conv2d8_tiled_half_spv,
+          dpro_conv2d8_tiled_half_spv_size,
+          4,
+          56)),
+      conv2d8_tiled16x8_half_(context.create_pipeline(
+          dpro_conv2d8_tiled16x8_half_spv,
+          dpro_conv2d8_tiled16x8_half_spv_size,
+          4,
+          56)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dpro_conv_transpose_nonoverlap_spv,
           dpro_conv_transpose_nonoverlap_spv_size,
@@ -170,6 +219,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv_transpose_nonoverlap_half_(context.create_pipeline(
           dpro_conv_transpose_nonoverlap_half_spv,
           dpro_conv_transpose_nonoverlap_half_spv_size,
+          4,
+          32)),
+      conv_transpose_gemm_half_(context.create_pipeline(
+          dpro_conv_transpose_gemm_half_spv,
+          dpro_conv_transpose_gemm_half_spv_size,
           4,
           32)),
       bilinear_align_true_(context.create_pipeline(
@@ -192,7 +246,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_prepare_tokens16_spv_size, 6, 0)),
       tokens_to_nchw_(context.create_pipeline(
           dpro_tokens_to_nchw_spv,
-          dpro_tokens_to_nchw_spv_size, 2, 4)),
+          dpro_tokens_to_nchw_spv_size, 2, 8)),
       merge_patch_(context.create_pipeline(
           dpro_merge_patch_spv,
           dpro_merge_patch_spv_size, 2, 16)),
@@ -212,6 +266,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
     linear16_half_.set_debug_name("linear16_half");
+    linear_vec4_.set_debug_name("linear_vec4");
+    linear_vec4_half_.set_debug_name("linear_vec4_half");
+    linear_vec8_.set_debug_name("linear_vec8");
+    linear_vec8_half_.set_debug_name("linear_vec8_half");
+    linear_vec16_.set_debug_name("linear_vec16");
+    linear_vec16_half_.set_debug_name("linear_vec16_half");
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -232,10 +292,20 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
+    conv2d_pointwise_gemm_.set_debug_name(
+        "conv2d_pointwise_gemm");
+    conv2d_pointwise_gemm_half_.set_debug_name(
+        "conv2d_pointwise_gemm_half");
+    conv2d8_tiled_half_.set_debug_name(
+        "conv2d8_tiled_half");
+    conv2d8_tiled16x8_half_.set_debug_name(
+        "conv2d8_tiled16x8_half");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
     conv_transpose_nonoverlap_half_.set_debug_name(
         "conv_transpose_nonoverlap_half");
+    conv_transpose_gemm_half_.set_debug_name(
+        "conv_transpose_gemm_half");
     bilinear_align_true_.set_debug_name(
         "bilinear_align_true");
     bilinear_align_true_image_.set_debug_name(
@@ -249,31 +319,43 @@ void VulkanOperators::prepare_tokens16(
     const VulkanBuffer& patch_weight,
     const VulkanBuffer& patch_bias,
     const VulkanBuffer& class_token,
-    const VulkanBuffer& position) {
-    require_bytes(image, std::uint64_t(3) * 384 * 384, "image");
+    const VulkanBuffer& position,
+    std::uint32_t batches) {
+    if (batches == 0) {
+        throw std::invalid_argument("token batch cannot be zero");
+    }
+    require_bytes(
+        image, std::uint64_t(batches) * 3 * 384 * 384, "image");
     require_bytes(
         patch_weight, std::uint64_t(1024) * 3 * 16 * 16,
         "patch weight");
     require_bytes(patch_bias, 1024, "patch bias");
     require_bytes(class_token, 1024, "class token");
     require_bytes(position, std::uint64_t(577) * 1024, "position");
-    require_bytes(output, std::uint64_t(577) * 1024, "tokens");
+    require_bytes(
+        output, std::uint64_t(batches) * 577 * 1024, "tokens");
     context_.dispatch(
         prepare_tokens16_,
         {&output, &image, &patch_weight, &patch_bias,
          &class_token, &position},
-        nullptr, 0, divide_up(1024, 8), divide_up(577, 8));
+        nullptr, 0, divide_up(1024, 8), divide_up(577, 8), batches);
 }
 
 void VulkanOperators::tokens_to_nchw(
     VulkanBuffer& output,
     const VulkanBuffer& tokens,
-    std::uint32_t channels) {
-    require_bytes(tokens, std::uint64_t(577) * channels, "tokens");
+    std::uint32_t channels,
+    std::uint32_t batch_index) {
+    require_bytes(
+        tokens,
+        std::uint64_t(batch_index + 1) * 577 * channels,
+        "tokens");
     require_bytes(output, std::uint64_t(576) * channels, "image");
+    const std::uint32_t parameters[2] = {
+        channels, batch_index};
     context_.dispatch(
         tokens_to_nchw_, {&output, &tokens},
-        &channels, sizeof(channels),
+        parameters, sizeof(parameters),
         divide_up(channels * 576, 256));
 }
 
@@ -379,7 +461,9 @@ void VulkanOperators::linear(
     std::uint32_t output_columns,
     bool gelu,
     bool block16,
-    bool half_weight) {
+    bool half_weight,
+    bool vectorized,
+    std::uint32_t vector_tile) {
     if (rows == 0 || input_columns == 0 || output_columns == 0) {
         throw std::invalid_argument("linear dimensions cannot be zero");
     }
@@ -399,25 +483,48 @@ void VulkanOperators::linear(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
-    context_.dispatch(
-        half_weight
+    VulkanPipeline& pipeline = vectorized
+        ? (vector_tile == 16
+            ? (half_weight ? linear_vec16_half_ : linear_vec16_)
+            : (vector_tile == 8
+                ? (half_weight ? linear_vec8_half_ : linear_vec8_)
+                : (half_weight
+                    ? linear_vec4_half_ : linear_vec4_)))
+        : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
-            : (block16 ? linear16_ : linear_),
+            : (block16 ? linear16_ : linear_));
+    context_.dispatch(
+        pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(divide_up(output_columns, 4), 8),
-        divide_up(divide_up(rows, 4), 8));
+        vectorized
+            ? divide_up(divide_up(output_columns, 4), 16)
+            : divide_up(divide_up(output_columns, 4), 8),
+        vectorized
+            ? divide_up(divide_up(rows, 7), 8)
+            : divide_up(divide_up(rows, 4), 8));
     if (gelu) {
         struct GeluParameters {
             std::uint32_t count;
-        } gelu_parameters{rows * output_columns};
-        context_.dispatch(
-            gelu_,
-            {&output, &output},
-            &gelu_parameters,
-            sizeof(gelu_parameters),
-            divide_up(gelu_parameters.count, 256));
+            std::uint32_t offset;
+        };
+        constexpr std::uint32_t maximum_elements =
+            65535u * 256u;
+        const std::uint32_t count = rows * output_columns;
+        for (std::uint32_t offset = 0;
+             offset < count;
+             offset += maximum_elements) {
+            const GeluParameters gelu_parameters{
+                std::min(maximum_elements, count - offset),
+                offset};
+            context_.dispatch(
+                gelu_,
+                {&output, &output},
+                &gelu_parameters,
+                sizeof(gelu_parameters),
+                divide_up(gelu_parameters.count, 256));
+        }
     }
 }
 
@@ -466,13 +573,24 @@ void VulkanOperators::add_scaled(
     struct Parameters {
         std::uint32_t count;
         std::uint32_t columns;
-    } parameters{count, columns};
-    context_.dispatch(
-        add_scaled_,
-        {&output, &addend, &scale, &residual},
-        &parameters,
-        sizeof(parameters),
-        divide_up(count, 256));
+        std::uint32_t offset;
+    };
+    constexpr std::uint32_t maximum_elements =
+        65535u * 256u;
+    for (std::uint32_t offset = 0;
+         offset < count;
+         offset += maximum_elements) {
+        const Parameters parameters{
+            std::min(maximum_elements, count - offset),
+            columns,
+            offset};
+        context_.dispatch(
+            add_scaled_,
+            {&output, &addend, &scale, &residual},
+            &parameters,
+            sizeof(parameters),
+            divide_up(parameters.count, 256));
+    }
 }
 
 void VulkanOperators::attention_head64(
@@ -572,13 +690,27 @@ void VulkanOperators::attention_head64(
     struct SoftmaxParameters {
         std::uint32_t rows;
         std::uint32_t columns;
-    } softmax_parameters{batches * heads * tokens, tokens};
-    context_.dispatch(
-        softmax_lastdim_,
-        {&scores, &scores},
-        &softmax_parameters,
-        sizeof(softmax_parameters),
-        softmax_parameters.rows);
+        std::uint32_t row_offset;
+    };
+    const std::uint32_t softmax_rows =
+        batches * heads * tokens;
+    constexpr std::uint32_t maximum_softmax_rows = 65535;
+    for (std::uint32_t row_offset = 0;
+         row_offset < softmax_rows;
+         row_offset += maximum_softmax_rows) {
+        const SoftmaxParameters softmax_parameters{
+            std::min(
+                maximum_softmax_rows,
+                softmax_rows - row_offset),
+            tokens,
+            row_offset};
+        context_.dispatch(
+            softmax_lastdim_,
+            {&scores, &scores},
+            &softmax_parameters,
+            sizeof(softmax_parameters),
+            softmax_parameters.rows);
+    }
     BmmParameters value_parameters{
         tokens, 64, tokens, batches * heads, 0, 1,
         heads * 64, 0, 2, heads, tokens};
@@ -882,16 +1014,37 @@ void VulkanOperators::conv2d(
             has_bias ? 1u : 0u,
             batches, output_channel_blocks, output_y, row_count,
         };
-        context_.dispatch(
-            half_weight
+        const bool pointwise =
+            kernel == 1 && stride == 1 && padding == 0 &&
+            output_width == input_width &&
+            output_height == input_height;
+        const bool tiled =
+            half_weight && block8 &&
+            kernel == 3 && stride == 1 && padding == 1 &&
+            output_width == input_width &&
+            output_height == input_height;
+        VulkanPipeline& pipeline = pointwise
+            ? (half_weight
+                ? conv2d_pointwise_gemm_half_
+                : conv2d_pointwise_gemm_)
+            : (tiled
+                ? conv2d8_tiled16x8_half_
+            : (half_weight
                 ? (block8 ? conv2d8_half_ : conv2d_half_)
-                : (block8 ? conv2d8_ : conv2d_),
+                : (block8 ? conv2d8_ : conv2d_)));
+        context_.dispatch(
+            pipeline,
             {&output, &input, &weight, &bias},
             &parameters,
             sizeof(parameters),
-            divide_up(output_width, 8),
-            divide_up(row_count, 8),
-            output_channel_blocks * batches);
+            pointwise
+                ? divide_up(output_width * row_count, 32)
+                : divide_up(output_width, tiled ? 16 : 8),
+            pointwise
+                ? divide_up(output_channels, 32)
+                : divide_up(row_count, 8),
+            pointwise ? batches
+                : output_channel_blocks * batches);
     }
 }
 
@@ -945,6 +1098,41 @@ void VulkanOperators::conv_transpose_nonoverlap(
     } parameters{
         input_width, input_height, input_channels,
         output_channels, kernel, batches, 0, 0};
+    if (half_weight) {
+        const std::uint32_t input_spatial =
+            input_width * input_height;
+        const std::uint64_t work_per_spatial =
+            std::uint64_t(input_channels) * output_channels *
+            kernel * kernel * batches;
+        constexpr std::uint64_t maximum_work_per_submission =
+            std::uint64_t(1500) * 1000 * 1000;
+        const std::uint32_t spatial_per_submission =
+            static_cast<std::uint32_t>(
+                std::max<std::uint64_t>(
+                    1,
+                    std::min<std::uint64_t>(
+                        input_spatial,
+                        maximum_work_per_submission /
+                            std::max<std::uint64_t>(
+                                work_per_spatial, 1))));
+        for (std::uint32_t spatial_offset = 0;
+             spatial_offset < input_spatial;
+             spatial_offset += spatial_per_submission) {
+            parameters.output_y_offset = spatial_offset;
+            parameters.output_y_count = std::min(
+                spatial_per_submission,
+                input_spatial - spatial_offset);
+            context_.dispatch(
+                conv_transpose_gemm_half_,
+                {&output, &input, &weight, &bias},
+                &parameters,
+                sizeof(parameters),
+                divide_up(parameters.output_y_count, 32),
+                divide_up(output_channels, 32),
+                batches * kernel * kernel);
+        }
+        return;
+    }
     const std::uint64_t work_per_row =
         std::uint64_t(output_width) * input_channels *
         output_channels * batches;

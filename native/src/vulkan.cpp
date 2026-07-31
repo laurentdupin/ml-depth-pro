@@ -243,6 +243,16 @@ VulkanContext::VulkanContext(
 #endif
     vkGetPhysicalDeviceMemoryProperties(
         physical_device_, &memory_properties_);
+    for (std::uint32_t heap_index = 0;
+         heap_index < memory_properties_.memoryHeapCount;
+         ++heap_index) {
+        const VkMemoryHeap& heap =
+            memory_properties_.memoryHeaps[heap_index];
+        if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+            device_local_memory_bytes_ = std::max(
+                device_local_memory_bytes_, heap.size);
+        }
+    }
 
     std::uint32_t extension_count = 0;
     check(

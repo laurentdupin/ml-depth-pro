@@ -273,12 +273,14 @@ Feature token_image(
     VulkanContext& context,
     VulkanOperators& operators,
     const VulkanBuffer& tokens,
-    std::uint32_t channels) {
+    std::uint32_t channels,
+    std::uint32_t batch_index = 0) {
     Feature result{
         context.create_device_buffer(
             std::uint64_t(channels) * 576 * sizeof(float)),
         channels, 24, 24};
-    operators.tokens_to_nchw(result.buffer, tokens, channels);
+    operators.tokens_to_nchw(
+        result.buffer, tokens, channels, batch_index);
     return result;
 }
 
@@ -323,58 +325,111 @@ GpuInferenceOutput infer_gpu(
         context.create_device_buffer(
             elements(1024, 48, 48) * sizeof(float)), 1024, 48, 48};
 
-    VulkanBuffer patch = context.create_device_buffer(
-        std::uint64_t(3) * 384 * 384 * sizeof(float));
+    constexpr std::uint32_t pyramid_patch_count = 35;
+    constexpr VkDeviceSize large_memory_threshold =
+        VkDeviceSize{10} * 1024 * 1024 * 1024;
+    const std::uint32_t encoder_batch_limit =
+        context.device_local_memory_bytes() >=
+            large_memory_threshold
+        ? 35u : 14u;
+    constexpr std::uint64_t patch_elements =
+        std::uint64_t(3) * 384 * 384;
+    std::vector<float> pyramid_patches(
+        pyramid_patch_count * patch_elements);
     for (std::uint32_t j = 0; j < 5; ++j) {
         for (std::uint32_t i = 0; i < 5; ++i) {
             const std::uint32_t index = j * 5 + i;
             const std::vector<float> pixels =
                 crop_host(x0, j * 288, i * 288);
-            context.upload(
-                patch, pixels.data(), pixels.size() * sizeof(float));
-            GpuEncoderOutput encoded = encoder_gpu(
-                context, model, operators,
-                "encoder.patch_encoder.", patch);
-            context.batch([&] {
-                Feature image =
-                    token_image(context, operators, encoded.capture5, 1024);
-                operators.merge_patch(
-                    latent0.buffer, image.buffer, 1024, 5, 3, index);
-                image =
-                    token_image(context, operators, encoded.capture11, 1024);
-                operators.merge_patch(
-                    latent1.buffer, image.buffer, 1024, 5, 3, index);
-                image =
-                    token_image(context, operators, encoded.final, 1024);
-                operators.merge_patch(
-                    feature0.buffer, image.buffer, 1024, 5, 3, index);
-            });
+            std::copy(
+                pixels.begin(), pixels.end(),
+                pyramid_patches.begin() + index * patch_elements);
         }
     }
     for (std::uint32_t j = 0; j < 3; ++j) {
         for (std::uint32_t i = 0; i < 3; ++i) {
-            const std::uint32_t index = j * 3 + i;
+            const std::uint32_t index = 25 + j * 3 + i;
             const std::vector<float> pixels =
                 crop_host(x1, j * 192, i * 192);
-            context.upload(
-                patch, pixels.data(), pixels.size() * sizeof(float));
-            GpuEncoderOutput encoded = encoder_gpu(
-                context, model, operators,
-                "encoder.patch_encoder.", patch);
-            context.batch([&] {
-                Feature image =
-                    token_image(context, operators, encoded.final, 1024);
-                operators.merge_patch(
-                    feature1.buffer, image.buffer, 1024, 3, 6, index);
-            });
+            std::copy(
+                pixels.begin(), pixels.end(),
+                pyramid_patches.begin() + index * patch_elements);
         }
     }
+    std::copy(
+        x2.values.begin(), x2.values.end(),
+        pyramid_patches.begin() + 34 * patch_elements);
+
+    Feature feature2{
+        context.create_device_buffer(
+            elements(1024, 24, 24) * sizeof(float)),
+        1024, 24, 24};
+    Feature patch_image{
+        context.create_device_buffer(
+            elements(1024, 24, 24) * sizeof(float)),
+        1024, 24, 24};
+    for (std::uint32_t batch_start = 0;
+         batch_start < pyramid_patch_count;
+         batch_start += encoder_batch_limit) {
+        const std::uint32_t batch_count = std::min(
+            encoder_batch_limit,
+            pyramid_patch_count - batch_start);
+        VulkanBuffer patch_batch = context.create_device_buffer(
+            std::uint64_t(batch_count) * patch_elements *
+            sizeof(float));
+        context.upload(
+            patch_batch,
+            pyramid_patches.data() + batch_start * patch_elements,
+            std::uint64_t(batch_count) * patch_elements *
+                sizeof(float));
+        GpuEncoderOutput encoded = encoder_gpu(
+            context, model, operators,
+            "encoder.patch_encoder.", patch_batch, batch_count);
+        context.batch([&] {
+            for (std::uint32_t local_index = 0;
+                 local_index < batch_count;
+                 ++local_index) {
+                const std::uint32_t index =
+                    batch_start + local_index;
+                if (index < 25) {
+                    operators.tokens_to_nchw(
+                        patch_image.buffer, encoded.capture5,
+                        1024, local_index);
+                    operators.merge_patch(
+                        latent0.buffer, patch_image.buffer,
+                        1024, 5, 3, index);
+                    operators.tokens_to_nchw(
+                        patch_image.buffer, encoded.capture11,
+                        1024, local_index);
+                    operators.merge_patch(
+                        latent1.buffer, patch_image.buffer,
+                        1024, 5, 3, index);
+                    operators.tokens_to_nchw(
+                        patch_image.buffer, encoded.final,
+                        1024, local_index);
+                    operators.merge_patch(
+                        feature0.buffer, patch_image.buffer,
+                        1024, 5, 3, index);
+                } else if (index < 34) {
+                    operators.tokens_to_nchw(
+                        patch_image.buffer, encoded.final,
+                        1024, local_index);
+                    operators.merge_patch(
+                        feature1.buffer, patch_image.buffer,
+                        1024, 3, 6, index - 25);
+                } else {
+                    operators.tokens_to_nchw(
+                        feature2.buffer, encoded.final,
+                        1024, local_index);
+                }
+            }
+        });
+    }
+
+    VulkanBuffer patch = context.create_device_buffer(
+        patch_elements * sizeof(float));
     context.upload(
         patch, x2.values.data(), x2.values.size() * sizeof(float));
-    GpuEncoderOutput patch_low = encoder_gpu(
-        context, model, operators, "encoder.patch_encoder.", patch);
-    Feature feature2 =
-        token_image(context, operators, patch_low.final, 1024);
     GpuEncoderOutput image_encoded = encoder_gpu(
         context, model, operators, "encoder.image_encoder.", patch);
     Feature global =

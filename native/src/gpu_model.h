@@ -24,9 +24,28 @@ public:
 
     const GpuTensor& tensor(std::string_view name) const;
     std::size_t tensor_count() const { return tensors_.size(); }
+    bool linear_tuned() const { return linear_tuned_; }
+    bool linear_block16() const { return linear_block16_; }
+    bool linear_vectorized() const { return linear_vectorized_; }
+    std::uint32_t linear_vector_tile() const {
+        return linear_vector_tile_;
+    }
+    void set_linear_tuning(
+        bool block16,
+        bool vectorized,
+        std::uint32_t vector_tile) {
+        linear_block16_ = block16;
+        linear_vectorized_ = vectorized;
+        linear_vector_tile_ = vector_tile;
+        linear_tuned_ = true;
+    }
 
 private:
     std::unordered_map<std::string_view, GpuTensor> tensors_;
+    bool linear_tuned_ = false;
+    bool linear_block16_ = false;
+    bool linear_vectorized_ = false;
+    std::uint32_t linear_vector_tile_ = 0;
 };
 
 }  // namespace depth_pro_native

@@ -18,11 +18,13 @@ layout(set = 0, binding = 3, std430) readonly buffer Residual {
 layout(push_constant) uniform Parameters {
     uint count;
     uint columns;
+    uint offset;
 } parameters;
 
 void main() {
-    const uint index = gl_GlobalInvocationID.x;
-    if (index < parameters.count) {
+    const uint local_index = gl_GlobalInvocationID.x;
+    if (local_index < parameters.count) {
+        const uint index = parameters.offset + local_index;
         precise float scaled =
             addend_buffer.data[index] *
             scale_buffer.data[index % parameters.columns];

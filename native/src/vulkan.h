@@ -172,6 +172,9 @@ public:
     ~VulkanContext();
 
     const std::string& device_name() const { return device_name_; }
+    VkDeviceSize device_local_memory_bytes() const {
+        return device_local_memory_bytes_;
+    }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
     }
@@ -417,6 +420,7 @@ private:
     std::atomic<std::uint64_t> tensor_upload_bytes_{0};
     std::atomic<std::uint64_t> tensor_download_bytes_{0};
     std::string device_name_;
+    VkDeviceSize device_local_memory_bytes_ = 0;
 };
 
 }  // namespace depth_pro_native

@@ -11,9 +11,12 @@ layout(set = 0, binding = 5, std430) readonly buffer Position { float v[]; } pos
 void main() {
     const uint feature = gl_GlobalInvocationID.x;
     const uint token = gl_GlobalInvocationID.y;
+    const uint batch = gl_GlobalInvocationID.z;
     if (feature >= 1024 || token >= 577) {
         return;
     }
+    const uint image_base = batch * 3 * 384 * 384;
+    const uint token_base = batch * 577 * 1024;
     float value;
     if (token == 0) {
         value = class_buffer.v[feature];
@@ -30,12 +33,13 @@ void main() {
                         px * 16 + kx;
                     const uint weight_index =
                         ((feature * 3 + channel) * 16 + ky) * 16 + kx;
-                    value += image_buffer.v[image_index] *
+                    value += image_buffer.v[image_base + image_index] *
                         weight_buffer.v[weight_index];
                 }
             }
         }
     }
     const uint index = token * 1024 + feature;
-    output_buffer.v[index] = value + position_buffer.v[index];
+    output_buffer.v[token_base + index] =
+        value + position_buffer.v[index];
 }

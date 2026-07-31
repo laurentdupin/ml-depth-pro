@@ -20,7 +20,9 @@ public:
         std::uint32_t output_columns,
         bool gelu,
         bool block16 = false,
-        bool half_weight = false);
+        bool half_weight = false,
+        bool vectorized = false,
+        std::uint32_t vector_tile = 0);
 
     void layer_norm(
         VulkanBuffer& output,
@@ -133,11 +135,13 @@ public:
         const VulkanBuffer& patch_weight,
         const VulkanBuffer& patch_bias,
         const VulkanBuffer& class_token,
-        const VulkanBuffer& position);
+        const VulkanBuffer& position,
+        std::uint32_t batches = 1);
     void tokens_to_nchw(
         VulkanBuffer& output,
         const VulkanBuffer& tokens,
-        std::uint32_t channels);
+        std::uint32_t channels,
+        std::uint32_t batch_index = 0);
     void merge_patch(
         VulkanBuffer& output,
         const VulkanBuffer& patch,
@@ -175,6 +179,12 @@ private:
     VulkanPipeline linear16_;
     VulkanPipeline linear_half_;
     VulkanPipeline linear16_half_;
+    VulkanPipeline linear_vec4_;
+    VulkanPipeline linear_vec4_half_;
+    VulkanPipeline linear_vec8_;
+    VulkanPipeline linear_vec8_half_;
+    VulkanPipeline linear_vec16_;
+    VulkanPipeline linear_vec16_half_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;
@@ -193,8 +203,13 @@ private:
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
     VulkanPipeline conv2d8_half_;
+    VulkanPipeline conv2d_pointwise_gemm_;
+    VulkanPipeline conv2d_pointwise_gemm_half_;
+    VulkanPipeline conv2d8_tiled_half_;
+    VulkanPipeline conv2d8_tiled16x8_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline conv_transpose_nonoverlap_half_;
+    VulkanPipeline conv_transpose_gemm_half_;
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline relu_;

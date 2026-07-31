@@ -20,6 +20,7 @@ GpuEncoderOutput encoder_gpu(
     VulkanOperators& operators,
     std::string_view prefix,
     const VulkanBuffer& image,
+    std::uint32_t batches = 1,
     std::vector<VulkanBuffer>* debug_blocks = nullptr);
 
 }  // namespace depth_pro_native

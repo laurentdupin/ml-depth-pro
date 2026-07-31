@@ -12,14 +12,16 @@ layout(set = 0, binding = 1, std430) readonly buffer Input {
 layout(push_constant) uniform Parameters {
     uint rows;
     uint columns;
+    uint row_offset;
 } parameters;
 
 shared float partials[128];
 
 void main() {
     const uint lane = gl_LocalInvocationID.x;
-    const uint row = gl_WorkGroupID.x;
-    if (row >= parameters.rows) return;
+    const uint local_row = gl_WorkGroupID.x;
+    if (local_row >= parameters.rows) return;
+    const uint row = parameters.row_offset + local_row;
     float maximum = -3.402823466e+38;
     for (uint column = lane;
          column < parameters.columns;

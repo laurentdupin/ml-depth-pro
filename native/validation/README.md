@@ -79,6 +79,33 @@ The patch encoder's block 5 and block 11 captures respectively validate at
 input upload and depth readback; external-resource residency is deliberately
 not advertised yet.
 
+### 2026-07-31 performance checkpoint
+
+The native executor now batches pyramid crops within a device-memory bound,
+autotunes vectorized half-weight transformer linears, uses tiled 3x3 and
+pointwise-GEMM convolutions, and expresses non-overlapping transpose
+convolutions as bounded GEMMs. Large elementwise and softmax workloads are
+split without changing their logical indexing. The 8 GiB path uses batches of
+14; adapters with at least 10 GiB of device-local memory use the complete
+35-crop batch. This policy is based on available memory rather than vendor or
+adapter names.
+
+The complete learned-FOV 140x140 reference remains within the original
+correctness gate:
+
+| GPU | Relative depth L1 | Maximum absolute | One-shot inference |
+|---|---:|---:|---:|
+| Radeon RX 9070 | `0.00142396` | `0.0141961` | `5.379 s` |
+| GeForce GTX 1080 | `0.00142432` | `0.0141955` | `16.852 s` |
+| Radeon RX 6700 XT | `0.00142394` | `0.0141963` | `12.508 s` |
+
+The persistent InferBridge fixed-63-degree-FOV path, which skips the separate
+FOV encoder, measured `4.494 s`, `15.604 s`, and `10.974 s` respectively.
+The RX 9070 therefore passes the requested five-second steady-state target;
+the GTX 1080 and RX 6700 XT remain above it. The retained change is still a
+material improvement over the previous `9.515 s`, `60.474 s`, and `17.911 s`
+embedded-harness medians. Model creation remains excluded.
+
 ## InferBridge BGRA and fixed-FOV contract
 
 ABI 3 adds `depth_pro_infer_bgra8_f32`. It preserves the Python worker's

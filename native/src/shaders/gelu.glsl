@@ -11,13 +11,15 @@ layout(set = 0, binding = 1, std430) readonly buffer Input {
 
 layout(push_constant) uniform Parameters {
     uint count;
+    uint offset;
 } parameters;
 
 void main() {
-    const uint index = gl_GlobalInvocationID.x;
-    if (index >= parameters.count) {
+    const uint local_index = gl_GlobalInvocationID.x;
+    if (local_index >= parameters.count) {
         return;
     }
+    const uint index = parameters.offset + local_index;
     const float value = input_buffer.data[index];
     const float x = value * 0.7071067811865475244;
     const float absolute_x = abs(x);
