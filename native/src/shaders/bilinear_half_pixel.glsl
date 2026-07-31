@@ -22,20 +22,22 @@ void main() {
     if (ox >= p.output_width || oy >= p.output_height || c >= p.channels) {
         return;
     }
-    const float raw_x = (float(ox) + 0.5) *
+    precise float raw_x = (float(ox) + 0.5) *
         float(p.input_width) / float(p.output_width) - 0.5;
-    const float raw_y = (float(oy) + 0.5) *
+    precise float raw_y = (float(oy) + 0.5) *
         float(p.input_height) / float(p.output_height) - 0.5;
-    const float sx = clamp(raw_x, 0.0, float(p.input_width - 1));
-    const float sy = clamp(raw_y, 0.0, float(p.input_height - 1));
+    precise float sx = clamp(raw_x, 0.0, float(p.input_width - 1));
+    precise float sy = clamp(raw_y, 0.0, float(p.input_height - 1));
     const uint x0 = uint(floor(sx));
     const uint y0 = uint(floor(sy));
     const uint x1 = min(x0 + 1, p.input_width - 1);
     const uint y1 = min(y0 + 1, p.input_height - 1);
     const float wx = sx - float(x0);
     const float wy = sy - float(y0);
-    const float top = mix(at(c, y0, x0), at(c, y0, x1), wx);
-    const float bottom = mix(at(c, y1, x0), at(c, y1, x1), wx);
-    output_buffer.v[(c * p.output_height + oy) * p.output_width + ox] =
-        mix(top, bottom, wy);
+    precise float top =
+        at(c, y0, x0) * (1.0 - wx) + at(c, y0, x1) * wx;
+    precise float bottom =
+        at(c, y1, x0) * (1.0 - wx) + at(c, y1, x1) * wx;
+    precise float value = top * (1.0 - wy) + bottom * wy;
+    output_buffer.v[(c * p.output_height + oy) * p.output_width + ox] = value;
 }

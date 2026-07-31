@@ -24,6 +24,9 @@
 
 namespace depth_pro_native {
 
+void global_transfer_counters(
+    std::uint64_t& upload_bytes, std::uint64_t& download_bytes);
+
 class VulkanContext;
 class VulkanPipeline;
 class VulkanBuffer;
@@ -82,6 +85,7 @@ public:
 
     bool ready() const;
     void wait() const;
+    void retire();
 
 private:
     friend class VulkanContext;
@@ -214,6 +218,7 @@ public:
         const VulkanBuffer& source,
         VkDeviceSize source_offset,
         VkDeviceSize bytes);
+    void clear(VulkanBuffer& destination);
     void transfer_counters(
         std::uint64_t& upload_bytes,
         std::uint64_t& download_bytes) const;
@@ -317,6 +322,10 @@ public:
         }
     }
 
+    void begin_deferred_sequence(VulkanSemaphore wait);
+    VulkanSubmission end_deferred_sequence(VulkanSemaphore signal);
+    void cancel_deferred_sequence() noexcept;
+
 private:
     friend class VulkanSemaphore;
     friend class VulkanSubmission;
@@ -399,6 +408,11 @@ private:
     bool track_resource_hazards_ = true;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
+    bool deferred_sequence_active_ = false;
+    VulkanSemaphore deferred_sequence_wait_;
+    std::vector<VulkanSubmission> deferred_sequence_submissions_;
+    std::vector<VulkanBatchedDescriptor> deferred_sequence_descriptors_;
+    std::vector<VulkanDeferredBuffer> deferred_sequence_buffers_;
     std::unordered_map<VkBuffer, VkAccessFlags>
         batch_buffer_access_;
     std::unordered_map<VkImage, VkAccessFlags>

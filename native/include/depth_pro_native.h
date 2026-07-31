@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define DEPTH_PRO_ABI_VERSION 3u
+#define DEPTH_PRO_ABI_VERSION 4u
 
 typedef struct depth_pro_context depth_pro_context;
 
@@ -29,6 +29,16 @@ typedef enum depth_pro_status {
     DEPTH_PRO_STATUS_OUT_OF_MEMORY = 2,
     DEPTH_PRO_STATUS_INTERNAL_ERROR = 3
 } depth_pro_status;
+
+typedef struct depth_pro_transfer_counters {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t tensor_upload_bytes;
+    uint64_t tensor_download_bytes;
+} depth_pro_transfer_counters;
+
+DEPTH_PRO_API depth_pro_status DEPTH_PRO_CALL depth_pro_get_transfer_counters(
+    depth_pro_transfer_counters* counters);
 
 DEPTH_PRO_API uint32_t DEPTH_PRO_CALL depth_pro_abi_version(void);
 DEPTH_PRO_API const char* DEPTH_PRO_CALL depth_pro_version_string(void);

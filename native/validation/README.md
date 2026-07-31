@@ -145,3 +145,30 @@ checks model loading, fixed-FOV parameters, source-size output, correlation,
 normalization, finite values, and output-lease lifetime. The direct Python
 CPU comparison was also rerun on all three GPUs: maximum worker-output
 deviation was `0.000106083` (`0.010609%` of normalized range).
+
+## Common D3D12/Vulkan GPU-resource path
+
+ABI 4 adds the common InferBridge GPU-resource path without changing the
+existing host-memory exports. On Windows, the harness imports a shared
+`DXGI_FORMAT_B8G8R8A8_UNORM` texture and its producer fence into Vulkan,
+performs resize/normalization, pyramid construction, the complete Depth Pro
+graph, and writes metric depth directly to a leased shared
+`DXGI_FORMAT_R32_FLOAT` texture. The output carries a shared D3D12 fence/value
+and the original frame correlation fields.
+
+Three reusable output slots permit three simultaneous live leases. A fourth
+submission is rejected until a lease is released; released slots retain and
+reuse their texture/fence handles when dimensions are unchanged. Learned and
+forced FOV are model-load modes. Learned FOV remains device-resident and feeds
+the scale operation directly; focal length is intentionally not read back
+through the depth-only common ABI.
+
+The RX 9070 public canary uses the InferBridge 1.6 C boundary and validates
+exact LUID selection, producer/consumer fences, three leases and stable slot
+reuse, frame/timestamp correlation, cancellation, lease survival across model
+and runtime shutdown, and zero per-frame tensor upload/download byte deltas.
+It also proves three preprocessing/graph cases: exact host-built x0 upload,
+GPU x0 readback/re-upload, and directly resident GPU x0. Under the shipping
+`(depth-min)/(25-min)` output transform, the final maximum deviations were
+`1.8219e-8` for forced 63-degree FOV and `6.14673e-8` for learned FOV. No
+`vkQueueWaitIdle` or `vkDeviceWaitIdle` call remains in the runtime.

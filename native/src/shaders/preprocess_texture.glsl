@@ -1,92 +1,45 @@
 #version 450
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
+layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D source_texture;
-
 layout(std430, binding = 1) writeonly buffer Destination {
     float values[];
-} destination_data;
-
+} output_data;
 layout(push_constant) uniform Parameters {
-    uint source_width;
-    uint source_height;
-    uint destination_width;
-    uint destination_height;
-} parameters;
-
-float cubic1(float value) {
-    const float a = -0.75;
-    return ((a + 2.0) * value - (a + 3.0)) *
-        value * value + 1.0;
-}
-
-float cubic2(float value) {
-    const float a = -0.75;
-    return ((a * value - 5.0 * a) * value + 8.0 * a) *
-        value - 4.0 * a;
-}
-
-float coefficient(int tap, float fraction) {
-    if (tap == 0) return cubic2(fraction + 1.0);
-    if (tap == 1) return cubic1(fraction);
-    if (tap == 2) return cubic1(1.0 - fraction);
-    return cubic2(2.0 - fraction);
-}
+    uint source_width, source_height;
+} p;
 
 void main() {
-    const uint destination_x = gl_GlobalInvocationID.x;
-    const uint destination_y = gl_GlobalInvocationID.y;
-    if (destination_x >= parameters.destination_width ||
-        destination_y >= parameters.destination_height) {
-        return;
-    }
-
-    const float source_x =
-        (float(destination_x) + 0.5) *
-            float(parameters.source_width) /
-            float(parameters.destination_width) -
-        0.5;
-    const float source_y =
-        (float(destination_y) + 0.5) *
-            float(parameters.source_height) /
-            float(parameters.destination_height) -
-        0.5;
-    const int base_x = int(floor(source_x));
-    const int base_y = int(floor(source_y));
-    const float fraction_x = source_x - float(base_x);
-    const float fraction_y = source_y - float(base_y);
-    const uint destination_plane =
-        parameters.destination_width * parameters.destination_height;
-    const uint destination_index =
-        destination_y * parameters.destination_width + destination_x;
-    const float means[3] = float[3](0.485, 0.456, 0.406);
-    const float deviations[3] = float[3](0.229, 0.224, 0.225);
-
-    for (uint channel = 0; channel < 3; ++channel) {
-        float resized = 0.0;
-        for (int tap_y = 0; tap_y < 4; ++tap_y) {
-            const int source_iy = clamp(
-                base_y - 1 + tap_y,
-                0,
-                int(parameters.source_height) - 1);
-            float row = 0.0;
-            for (int tap_x = 0; tap_x < 4; ++tap_x) {
-                const int source_ix = clamp(
-                    base_x - 1 + tap_x,
-                    0,
-                    int(parameters.source_width) - 1);
-                const vec4 pixel = texelFetch(
-                    source_texture,
-                    ivec2(source_ix, source_iy),
-                    0);
-                row += pixel[channel] *
-                    coefficient(tap_x, fraction_x);
-            }
-            resized += row * coefficient(tap_y, fraction_y);
-        }
-        destination_data.values[
-            channel * destination_plane + destination_index] =
-            (resized - means[channel]) / deviations[channel];
-    }
+    const uint x = gl_GlobalInvocationID.x;
+    const uint y = gl_GlobalInvocationID.y;
+    if (x >= 1536u || y >= 1536u) return;
+    precise float raw_x =
+        (float(x) + 0.5) * float(p.source_width) / 1536.0 - 0.5;
+    precise float raw_y =
+        (float(y) + 0.5) * float(p.source_height) / 1536.0 - 0.5;
+    precise float sx = clamp(raw_x, 0.0, float(p.source_width - 1u));
+    precise float sy = clamp(raw_y, 0.0, float(p.source_height - 1u));
+    const int x0 = int(sx);
+    const int y0 = int(sy);
+    const int x1 = min(x0 + 1, int(p.source_width) - 1);
+    const int y1 = min(y0 + 1, int(p.source_height) - 1);
+    // The host contract consumes the first three BGRA bytes as B,G,R planes.
+    // Normalize before interpolation to preserve the host preprocessing order.
+    precise vec3 p00 =
+        texelFetch(source_texture, ivec2(x0, y0), 0).bgr * 2.0 - 1.0;
+    precise vec3 p01 =
+        texelFetch(source_texture, ivec2(x1, y0), 0).bgr * 2.0 - 1.0;
+    precise vec3 p10 =
+        texelFetch(source_texture, ivec2(x0, y1), 0).bgr * 2.0 - 1.0;
+    precise vec3 p11 =
+        texelFetch(source_texture, ivec2(x1, y1), 0).bgr * 2.0 - 1.0;
+    precise vec3 top = p00 * (1.0 - fract(sx)) + p01 * fract(sx);
+    precise vec3 bottom = p10 * (1.0 - fract(sx)) + p11 * fract(sx);
+    precise vec3 value =
+        top * (1.0 - fract(sy)) + bottom * fract(sy);
+    const uint plane = 1536u * 1536u;
+    const uint index = y * 1536u + x;
+    output_data.values[index] = value.r;
+    output_data.values[plane + index] = value.g;
+    output_data.values[2u * plane + index] = value.b;
 }

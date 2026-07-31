@@ -286,32 +286,26 @@ Feature token_image(
 
 }  // namespace
 
-GpuInferenceOutput infer_gpu(
+GpuDeviceInferenceOutput infer_gpu_device(
     VulkanContext& context,
     GpuModel& model,
     VulkanOperators& operators,
-    const float* rgb,
+    const VulkanBuffer& pyramid_patches,
+    const VulkanBuffer& patch,
+    const VulkanBuffer& zero,
+    const VulkanBuffer* forced_fov,
     std::uint32_t width,
-    std::uint32_t height,
-    float forced_fov_degrees) {
-    if (!rgb || width == 0 || height == 0) {
-        throw std::invalid_argument("invalid Depth Pro GPU image");
+    std::uint32_t height) {
+    constexpr std::uint32_t pyramid_patch_count = 35;
+    constexpr std::uint64_t patch_elements =
+        std::uint64_t(3) * 384 * 384;
+    if (width == 0 || height == 0 ||
+        pyramid_patches.size() <
+            pyramid_patch_count * patch_elements * sizeof(float) ||
+        patch.size() < patch_elements * sizeof(float) ||
+        zero.size() < 1024 * sizeof(float)) {
+        throw std::invalid_argument("invalid Depth Pro device graph input");
     }
-    HostImage input{3, height, width, std::vector<float>(
-        static_cast<std::size_t>(elements(3, height, width)))};
-    for (std::size_t index = 0; index < input.values.size(); ++index) {
-        input.values[index] = (rgb[index] - 0.5f) / 0.5f;
-    }
-    HostImage x0 = resize_host(input, 1536, 1536);
-    HostImage x1 = resize_host(x0, 768, 768);
-    HostImage x2 = resize_host(x0, 384, 384);
-
-    VulkanBuffer zero =
-        context.create_device_buffer(1024 * sizeof(float));
-    const std::vector<float> zero_values(1024, 0.0f);
-    context.upload(
-        zero, zero_values.data(),
-        zero_values.size() * sizeof(float));
     Feature latent0{
         context.create_device_buffer(
             elements(1024, 96, 96) * sizeof(float)), 1024, 96, 96};
@@ -325,45 +319,21 @@ GpuInferenceOutput infer_gpu(
         context.create_device_buffer(
             elements(1024, 48, 48) * sizeof(float)), 1024, 48, 48};
 
-    constexpr std::uint32_t pyramid_patch_count = 35;
     constexpr VkDeviceSize large_memory_threshold =
         VkDeviceSize{10} * 1024 * 1024 * 1024;
     const std::uint32_t encoder_batch_limit =
         context.device_local_memory_bytes() >=
             large_memory_threshold
         ? 35u : 14u;
-    constexpr std::uint64_t patch_elements =
-        std::uint64_t(3) * 384 * 384;
-    std::vector<float> pyramid_patches(
-        pyramid_patch_count * patch_elements);
-    for (std::uint32_t j = 0; j < 5; ++j) {
-        for (std::uint32_t i = 0; i < 5; ++i) {
-            const std::uint32_t index = j * 5 + i;
-            const std::vector<float> pixels =
-                crop_host(x0, j * 288, i * 288);
-            std::copy(
-                pixels.begin(), pixels.end(),
-                pyramid_patches.begin() + index * patch_elements);
-        }
-    }
-    for (std::uint32_t j = 0; j < 3; ++j) {
-        for (std::uint32_t i = 0; i < 3; ++i) {
-            const std::uint32_t index = 25 + j * 3 + i;
-            const std::vector<float> pixels =
-                crop_host(x1, j * 192, i * 192);
-            std::copy(
-                pixels.begin(), pixels.end(),
-                pyramid_patches.begin() + index * patch_elements);
-        }
-    }
-    std::copy(
-        x2.values.begin(), x2.values.end(),
-        pyramid_patches.begin() + 34 * patch_elements);
-
     Feature feature2{
         context.create_device_buffer(
             elements(1024, 24, 24) * sizeof(float)),
         1024, 24, 24};
+    context.clear(latent0.buffer);
+    context.clear(latent1.buffer);
+    context.clear(feature0.buffer);
+    context.clear(feature1.buffer);
+    context.clear(feature2.buffer);
     Feature patch_image{
         context.create_device_buffer(
             elements(1024, 24, 24) * sizeof(float)),
@@ -377,11 +347,10 @@ GpuInferenceOutput infer_gpu(
         VulkanBuffer patch_batch = context.create_device_buffer(
             std::uint64_t(batch_count) * patch_elements *
             sizeof(float));
-        context.upload(
-            patch_batch,
-            pyramid_patches.data() + batch_start * patch_elements,
-            std::uint64_t(batch_count) * patch_elements *
-                sizeof(float));
+        context.copy(
+            patch_batch, 0, pyramid_patches,
+            std::uint64_t(batch_start) * patch_elements * sizeof(float),
+            std::uint64_t(batch_count) * patch_elements * sizeof(float));
         GpuEncoderOutput encoded = encoder_gpu(
             context, model, operators,
             "encoder.patch_encoder.", patch_batch, batch_count);
@@ -426,10 +395,6 @@ GpuInferenceOutput infer_gpu(
         });
     }
 
-    VulkanBuffer patch = context.create_device_buffer(
-        patch_elements * sizeof(float));
-    context.upload(
-        patch, x2.values.data(), x2.values.size() * sizeof(float));
     GpuEncoderOutput image_encoded = encoder_gpu(
         context, model, operators, "encoder.image_encoder.", patch);
     Feature global =
@@ -519,12 +484,10 @@ GpuInferenceOutput infer_gpu(
     relu(operators, path);
 
     Feature fov;
-    if (forced_fov_degrees > 0.0f &&
-        forced_fov_degrees < 180.0f) {
+    if (forced_fov != nullptr) {
         fov = Feature{
             context.create_device_buffer(sizeof(float)), 1, 1, 1};
-        context.upload(
-            fov.buffer, &forced_fov_degrees, sizeof(float));
+        context.copy(fov.buffer, 0, *forced_fov, 0, sizeof(float));
     } else {
     GpuEncoderOutput fov_encoded = encoder_gpu(
         context, model, operators, "fov.encoder.0.", patch);
@@ -579,13 +542,82 @@ GpuInferenceOutput infer_gpu(
         operators.reciprocal_depth(
             depth.buffer, resized.buffer, width * height);
     });
+    return {std::move(depth.buffer), std::move(fov.buffer)};
+}
+
+GpuInferenceOutput infer_gpu(
+    VulkanContext& context,
+    GpuModel& model,
+    VulkanOperators& operators,
+    const float* rgb,
+    std::uint32_t width,
+    std::uint32_t height,
+    float forced_fov_degrees) {
+    if (!rgb || width == 0 || height == 0) {
+        throw std::invalid_argument("invalid Depth Pro GPU image");
+    }
+    HostImage input{3, height, width, std::vector<float>(
+        static_cast<std::size_t>(elements(3, height, width)))};
+    for (std::size_t index = 0; index < input.values.size(); ++index) {
+        input.values[index] = (rgb[index] - 0.5f) / 0.5f;
+    }
+    HostImage x0 = resize_host(input, 1536, 1536);
+    HostImage x1 = resize_host(x0, 768, 768);
+    HostImage x2 = resize_host(x0, 384, 384);
+    constexpr std::uint32_t patch_count = 35;
+    constexpr std::uint64_t patch_elements =
+        std::uint64_t(3) * 384 * 384;
+    std::vector<float> host_patches(patch_count * patch_elements);
+    for (std::uint32_t j = 0; j < 5; ++j) {
+        for (std::uint32_t i = 0; i < 5; ++i) {
+            const std::uint32_t index = j * 5 + i;
+            const std::vector<float> pixels =
+                crop_host(x0, j * 288, i * 288);
+            std::copy(
+                pixels.begin(), pixels.end(),
+                host_patches.begin() + index * patch_elements);
+        }
+    }
+    for (std::uint32_t j = 0; j < 3; ++j) {
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            const std::uint32_t index = 25 + j * 3 + i;
+            const std::vector<float> pixels =
+                crop_host(x1, j * 192, i * 192);
+            std::copy(
+                pixels.begin(), pixels.end(),
+                host_patches.begin() + index * patch_elements);
+        }
+    }
+    std::copy(
+        x2.values.begin(), x2.values.end(),
+        host_patches.begin() + 34 * patch_elements);
+    VulkanBuffer patches = context.create_device_buffer(
+        host_patches.size() * sizeof(float));
+    VulkanBuffer patch = context.create_device_buffer(
+        x2.values.size() * sizeof(float));
+    VulkanBuffer zero = context.create_device_buffer(1024 * sizeof(float));
+    const std::vector<float> zero_values(1024, 0.0f);
+    context.upload(
+        patches, host_patches.data(), host_patches.size() * sizeof(float));
+    context.upload(patch, x2.values.data(), x2.values.size() * sizeof(float));
+    context.upload(zero, zero_values.data(), zero_values.size() * sizeof(float));
+    VulkanBuffer forced_fov;
+    const VulkanBuffer* forced_fov_pointer = nullptr;
+    if (forced_fov_degrees > 0.0f && forced_fov_degrees < 180.0f) {
+        forced_fov = context.create_device_buffer(sizeof(float));
+        context.upload(forced_fov, &forced_fov_degrees, sizeof(float));
+        forced_fov_pointer = &forced_fov;
+    }
+    GpuDeviceInferenceOutput device = infer_gpu_device(
+        context, model, operators, patches, patch, zero,
+        forced_fov_pointer, width, height);
     GpuInferenceOutput output;
     output.depth.resize(std::uint64_t(width) * height);
     context.download(
-        depth.buffer, output.depth.data(),
-        output.depth.size() * sizeof(float));
+        device.depth, output.depth.data(), output.depth.size() * sizeof(float));
     float fov_degrees = 0.0f;
-    context.download(fov.buffer, &fov_degrees, sizeof(fov_degrees));
+    context.download(
+        device.fov_degrees, &fov_degrees, sizeof(fov_degrees));
     output.focal_length_pixels =
         0.5f * width /
         std::tan(

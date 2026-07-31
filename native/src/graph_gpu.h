@@ -13,6 +13,22 @@ struct GpuInferenceOutput {
     float focal_length_pixels = 0.0f;
 };
 
+struct GpuDeviceInferenceOutput {
+    VulkanBuffer depth;
+    VulkanBuffer fov_degrees;
+};
+
+GpuDeviceInferenceOutput infer_gpu_device(
+    VulkanContext& context,
+    GpuModel& model,
+    VulkanOperators& operators,
+    const VulkanBuffer& pyramid_patches,
+    const VulkanBuffer& image_patch,
+    const VulkanBuffer& zero,
+    const VulkanBuffer* forced_fov,
+    std::uint32_t width,
+    std::uint32_t height);
+
 GpuInferenceOutput infer_gpu(
     VulkanContext& context,
     GpuModel& model,

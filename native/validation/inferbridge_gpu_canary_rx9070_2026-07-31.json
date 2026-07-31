@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-07-31",
+  "device": "AMD Radeon RX 9070",
+  "publicBoundary": "InferBridge harness API 1.6",
+  "input": {
+    "domain": "d3d12",
+    "kind": "image_2d",
+    "format": "DXGI_FORMAT_B8G8R8A8_UNORM",
+    "dimensions": [320, 180],
+    "producerSynchronization": "shared D3D12 fence/value"
+  },
+  "output": {
+    "domain": "d3d12",
+    "kind": "image_2d",
+    "format": "DXGI_FORMAT_R32_FLOAT",
+    "consumerSynchronization": "shared D3D12 fence/value",
+    "leaseSlots": 3
+  },
+  "preprocessing": {
+    "x0MaximumAbsoluteError": 0.0000610352,
+    "x1MaximumAbsoluteError": 0.0000716448,
+    "x2MaximumAbsoluteError": 0.0000676215,
+    "pyramidAssemblyMaximumAbsoluteError": 0.0
+  },
+  "forcedFov63": {
+    "caseAToCpuMaximum": 0.0000000158325,
+    "caseAToBMaximum": 0.0000000133878,
+    "caseBToCMaximum": 0.0,
+    "endToEndWorkerOutputMaximum": 0.000000018219
+  },
+  "learnedFov": {
+    "caseAToCpuMaximum": 0.0000000470318,
+    "caseAToBMaximum": 0.0000000514556,
+    "caseBToCMaximum": 0.0,
+    "endToEndWorkerOutputMaximum": 0.0000000614673
+  },
+  "lifecycle": {
+    "exactLuidSelection": true,
+    "sourceFrameAndTimestampCorrelation": true,
+    "threeOverlappingLeases": true,
+    "stableHandleReuseAfterRelease": true,
+    "fourthLiveLeaseRejected": true,
+    "cancellation": true,
+    "leaseSurvivesModelAndRuntimeShutdown": true
+  },
+  "transfers": {
+    "tensorUploadByteDeltaPerFrame": 0,
+    "tensorDownloadByteDeltaPerFrame": 0,
+    "zeroHostTransfers": true
+  },
+  "synchronization": {
+    "queueWaitIdleCalls": 0,
+    "deviceWaitIdleCalls": 0,
+    "cpuWaitsBetweenOperators": 0
+  },
+  "tests": [
+    "depth_pro_c_abi_smoke",
+    "depth_pro_harness_abi_smoke",
+    "depth_pro_harness_full_graph",
+    "depth_pro_d3d12_full_graph forced",
+    "depth_pro_d3d12_full_graph learned"
+  ]
+}

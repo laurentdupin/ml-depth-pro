@@ -64,7 +64,27 @@ uint32_t DEPTH_PRO_CALL depth_pro_abi_version(void) {
 }
 
 const char* DEPTH_PRO_CALL depth_pro_version_string(void) {
-    return "0.3.0-image-cpu-vulkan-full-graph";
+    return "0.4.0-d3d12-vulkan-gpu-resident";
+}
+
+depth_pro_status DEPTH_PRO_CALL depth_pro_get_transfer_counters(
+    depth_pro_transfer_counters* counters) {
+    if (counters == nullptr ||
+        counters->struct_size < sizeof(*counters)) {
+        return fail(
+            DEPTH_PRO_STATUS_INVALID_ARGUMENT,
+            "invalid transfer counter output");
+    }
+    counters->abi_version = DEPTH_PRO_ABI_VERSION;
+#if defined(DEPTH_PRO_WITH_VULKAN)
+    depth_pro_native::global_transfer_counters(
+        counters->tensor_upload_bytes,
+        counters->tensor_download_bytes);
+#else
+    counters->tensor_upload_bytes = 0u;
+    counters->tensor_download_bytes = 0u;
+#endif
+    return DEPTH_PRO_STATUS_OK;
 }
 
 depth_pro_status DEPTH_PRO_CALL depth_pro_create_vulkan(

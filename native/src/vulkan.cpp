@@ -12,6 +12,9 @@
 namespace depth_pro_native {
 namespace {
 
+std::atomic<std::uint64_t> g_tensor_upload_bytes{0u};
+std::atomic<std::uint64_t> g_tensor_download_bytes{0u};
+
 template <typename Handle>
 void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
@@ -35,6 +38,7 @@ bool has_extension(
 struct VulkanSubmission::Resources {
     std::vector<VulkanBatchedDescriptor> descriptor_sets;
     std::vector<VulkanDeferredBuffer> deferred_buffers;
+    std::vector<VulkanSubmission> prior_submissions;
     VulkanSemaphore wait;
     VulkanSemaphore signal;
 };
@@ -449,15 +453,17 @@ VulkanContext::VulkanContext(
         "vkCreateCommandPool");
 
     const VkDescriptorPoolSize pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
     };
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
         VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        1024,
-        2,
+        8192,
+        4,
         pool_sizes,
     };
     check(
@@ -493,7 +499,6 @@ VulkanContext::~VulkanContext() {
 
 void VulkanContext::release() noexcept {
     if (device_) {
-        vkDeviceWaitIdle(device_);
         print_profile();
         cancel_batch();
         for (VulkanDeferredBuffer& buffer : device_buffer_pool_) {
@@ -1068,14 +1073,110 @@ VkCommandBuffer VulkanContext::begin_commands() {
         nullptr,
     };
     check(vkBeginCommandBuffer(command, &begin_info), "vkBeginCommandBuffer");
+    if (deferred_sequence_active_) {
+        const VkMemoryBarrier barrier{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        vkCmdPipelineBarrier(
+            command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier,
+            0, nullptr, 0, nullptr);
+    }
     return command;
+}
+
+void VulkanSubmission::retire() {
+    if (!ready()) {
+        throw std::logic_error("Vulkan submission is not complete");
+    }
+    owner_->destroy(*this);
 }
 
 void VulkanContext::end_commands(
     VkCommandBuffer command,
     const VulkanSemaphore* wait) {
+    if (deferred_sequence_active_) {
+        const VulkanSemaphore* effective_wait = wait;
+        if (effective_wait == nullptr &&
+            deferred_sequence_submissions_.empty() &&
+            deferred_sequence_wait_.owner_ != nullptr) {
+            effective_wait = &deferred_sequence_wait_;
+        }
+        VulkanSubmission submission =
+            submit_commands(command, effective_wait);
+        if (effective_wait == &deferred_sequence_wait_) {
+            auto resources = std::make_unique<VulkanSubmission::Resources>();
+            resources->wait = std::move(deferred_sequence_wait_);
+            submission.resources_ = resources.release();
+        }
+        deferred_sequence_submissions_.push_back(std::move(submission));
+        return;
+    }
     VulkanSubmission submission = submit_commands(command, wait);
     submission.wait();
+}
+
+void VulkanContext::begin_deferred_sequence(VulkanSemaphore wait) {
+    if (deferred_sequence_active_ || batch_command_ != VK_NULL_HANDLE ||
+        wait.owner_ != this) {
+        throw std::logic_error("invalid deferred Vulkan sequence start");
+    }
+    deferred_sequence_active_ = true;
+    deferred_sequence_wait_ = std::move(wait);
+}
+
+VulkanSubmission VulkanContext::end_deferred_sequence(
+    VulkanSemaphore signal) {
+    if (!deferred_sequence_active_ || batch_command_ != VK_NULL_HANDLE ||
+        signal.owner_ != this) {
+        throw std::logic_error("invalid deferred Vulkan sequence end");
+    }
+    VkCommandBuffer command = begin_commands();
+    VulkanSubmission final_submission;
+    try {
+        const VulkanSemaphore* wait =
+            deferred_sequence_submissions_.empty() ?
+                &deferred_sequence_wait_ : nullptr;
+        final_submission = submit_commands(command, wait, &signal);
+        auto resources = std::make_unique<VulkanSubmission::Resources>();
+        resources->descriptor_sets =
+            std::move(deferred_sequence_descriptors_);
+        resources->deferred_buffers =
+            std::move(deferred_sequence_buffers_);
+        resources->prior_submissions =
+            std::move(deferred_sequence_submissions_);
+        resources->wait = std::move(deferred_sequence_wait_);
+        resources->signal = std::move(signal);
+        final_submission.resources_ = resources.release();
+        deferred_sequence_active_ = false;
+        return final_submission;
+    } catch (...) {
+        deferred_sequence_active_ = false;
+        cancel_deferred_sequence();
+        throw;
+    }
+}
+
+void VulkanContext::cancel_deferred_sequence() noexcept {
+    deferred_sequence_active_ = false;
+    deferred_sequence_submissions_.clear();
+    for (const VulkanBatchedDescriptor& descriptor :
+         deferred_sequence_descriptors_) {
+        if (descriptor.pipeline && descriptor.set) {
+            descriptor.pipeline->cached_descriptor_sets_.push_back(
+                descriptor.set);
+        }
+    }
+    deferred_sequence_descriptors_.clear();
+    for (const VulkanDeferredBuffer& buffer : deferred_sequence_buffers_) {
+        recycle_or_destroy(buffer);
+    }
+    deferred_sequence_buffers_.clear();
+    deferred_sequence_wait_ = VulkanSemaphore{};
 }
 
 VulkanSubmission VulkanContext::submit_commands(
@@ -1233,7 +1334,23 @@ void VulkanContext::end_batch() {
     batch_command_ = VK_NULL_HANDLE;
     batch_has_dispatch_ = false;
     end_commands(command);
-    release_batch_resources();
+    if (deferred_sequence_active_) {
+        deferred_sequence_descriptors_.insert(
+            deferred_sequence_descriptors_.end(),
+            std::make_move_iterator(batch_descriptor_sets_.begin()),
+            std::make_move_iterator(batch_descriptor_sets_.end()));
+        batch_descriptor_sets_.clear();
+        deferred_sequence_buffers_.insert(
+            deferred_sequence_buffers_.end(),
+            std::make_move_iterator(batch_deferred_buffers_.begin()),
+            std::make_move_iterator(batch_deferred_buffers_.end()));
+        batch_deferred_buffers_.clear();
+        batch_buffer_access_.clear();
+        batch_image_access_.clear();
+        batch_image_layout_.clear();
+    } else {
+        release_batch_resources();
+    }
 }
 
 void VulkanContext::cancel_batch() noexcept {
@@ -1277,6 +1394,17 @@ void VulkanContext::copy(
         source_offset, destination_offset, bytes);
 }
 
+void VulkanContext::clear(VulkanBuffer& destination) {
+    if (destination.owner_ != this ||
+        destination.buffer_ == VK_NULL_HANDLE) {
+        throw std::invalid_argument("invalid Vulkan buffer clear");
+    }
+    VkCommandBuffer command = begin_commands();
+    vkCmdFillBuffer(
+        command, destination.buffer_, 0, destination.size_, 0u);
+    end_commands(command);
+}
+
 void VulkanContext::upload(
     VulkanBuffer& destination,
     const void* data,
@@ -1287,6 +1415,8 @@ void VulkanContext::upload(
     tensor_upload_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_upload_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     std::memcpy(staging.mapped_, data, bytes);
     copy_buffer_raw(
@@ -1303,6 +1433,8 @@ void VulkanContext::download(
     tensor_download_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_download_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer_raw(
         source.buffer_, staging.buffer_, 0, 0, bytes);
@@ -1316,6 +1448,12 @@ void VulkanContext::transfer_counters(
         tensor_upload_bytes_.load(std::memory_order_relaxed);
     download_bytes =
         tensor_download_bytes_.load(std::memory_order_relaxed);
+}
+
+void global_transfer_counters(
+    std::uint64_t& upload_bytes, std::uint64_t& download_bytes) {
+    upload_bytes = g_tensor_upload_bytes.load(std::memory_order_relaxed);
+    download_bytes = g_tensor_download_bytes.load(std::memory_order_relaxed);
 }
 
 void VulkanContext::acquire_external_buffer(
@@ -1795,7 +1933,12 @@ void VulkanContext::dispatch_resources(
 
     const bool batched = batch_command_ != VK_NULL_HANDLE;
     if (batched && wait != nullptr) {
-        pipeline.cached_descriptor_sets_.push_back(descriptor_set);
+        if (deferred_sequence_active_) {
+            deferred_sequence_descriptors_.push_back(
+                {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
+        } else {
+            pipeline.cached_descriptor_sets_.push_back(descriptor_set);
+        }
         throw std::invalid_argument(
             "external wait is not supported inside a Vulkan batch");
     }
@@ -1984,22 +2127,47 @@ void VulkanContext::dispatch_resources(
             record_profile(
                 pipeline, timestamps[1] - timestamps[0]);
         }
-        pipeline.cached_descriptor_sets_.push_back(descriptor_set);
+        if (deferred_sequence_active_) {
+            deferred_sequence_descriptors_.push_back(
+                {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
+        } else {
+            pipeline.cached_descriptor_sets_.push_back(descriptor_set);
+        }
     }
 }
 
 void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
+    if (deferred_sequence_active_ &&
+        (buffer.buffer_ != VK_NULL_HANDLE || buffer.memory_ != VK_NULL_HANDLE)) {
+        // The sequence records later uses only after the logical lifetime has
+        // ended. Reusing the still-live VkBuffer is safe because queue order
+        // and the sequence-wide memory barriers serialize those uses. Never
+        // destroy pending resources; retain the high-water allocation pool.
+        if (buffer.mapped_) {
+            host_buffer_pool_.push_back({
+                buffer.buffer_, buffer.memory_, buffer.mapped_,
+                buffer.size_, buffer.cacheable_});
+            pooled_host_bytes_ += buffer.size_;
+        } else {
+            device_buffer_pool_.push_back({
+                buffer.buffer_, buffer.memory_, nullptr,
+                buffer.size_, buffer.cacheable_});
+            pooled_device_bytes_ += buffer.size_;
+        }
+        buffer.owner_ = nullptr;
+        buffer.buffer_ = VK_NULL_HANDLE;
+        buffer.memory_ = VK_NULL_HANDLE;
+        buffer.mapped_ = nullptr;
+        buffer.size_ = 0;
+        buffer.cacheable_ = false;
+        return;
+    }
     if (batch_command_ != VK_NULL_HANDLE &&
         (buffer.buffer_ != VK_NULL_HANDLE ||
          buffer.memory_ != VK_NULL_HANDLE)) {
-        batch_deferred_buffers_.push_back(
-            {
-                buffer.buffer_,
-                buffer.memory_,
-                buffer.mapped_,
-                buffer.size_,
-                buffer.cacheable_,
-            });
+        batch_deferred_buffers_.push_back({
+            buffer.buffer_, buffer.memory_, buffer.mapped_,
+            buffer.size_, buffer.cacheable_});
         buffer.owner_ = nullptr;
         buffer.buffer_ = VK_NULL_HANDLE;
         buffer.memory_ = VK_NULL_HANDLE;

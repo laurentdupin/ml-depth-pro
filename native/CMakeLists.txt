@@ -70,7 +70,8 @@ if(DEPTH_PRO_WITH_VULKAN)
             project_tokens_half relu softmax_lastdim
             softmax_lastdim_half prepare_tokens16 tokens_to_nchw
             merge_patch concatenate bilinear_half_pixel
-            scale_inverse reciprocal_depth)
+            scale_inverse reciprocal_depth preprocess_texture
+            pyramid_patches write_depth_image)
         depth_pro_compile_shader(${SHADER})
     endforeach()
 endif()
@@ -91,10 +92,15 @@ if(DEPTH_PRO_WITH_VULKAN)
         src/gpu_model.cpp
         src/encoder_gpu.cpp
         src/graph_gpu.cpp
+        src/gpu_io.cpp
+        src/external_gpu.cpp
         ${DEPTH_PRO_SHADER_HEADERS})
     target_include_directories(
         depth_pro_model PRIVATE "${DEPTH_PRO_GENERATED_DIR}")
     target_link_libraries(depth_pro_model PRIVATE Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(depth_pro_model PRIVATE d3d12 dxgi)
+    endif()
     target_compile_definitions(
         depth_pro_model PRIVATE DEPTH_PRO_WITH_VULKAN=1)
 endif()
@@ -149,6 +155,31 @@ if(BUILD_TESTING)
         COMMAND depth_pro_harness_full_graph)
     set_tests_properties(
         depth_pro_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32 AND DEPTH_PRO_WITH_VULKAN)
+        add_executable(
+            depth_pro_d3d12_full_graph
+            tests/d3d12_full_graph.cpp
+            src/vulkan.cpp
+            src/operators.cpp
+            src/gpu_model.cpp
+            src/encoder_gpu.cpp
+            src/graph_gpu.cpp
+            src/gpu_io.cpp
+            ${DEPTH_PRO_SHADER_HEADERS})
+        target_link_libraries(
+            depth_pro_d3d12_full_graph PRIVATE
+            depth_pro_model depth_pro_core Vulkan::Vulkan d3d12 dxgi)
+        target_include_directories(
+            depth_pro_d3d12_full_graph PRIVATE
+            include src "${DEPTH_PRO_GENERATED_DIR}")
+        target_compile_options(
+            depth_pro_d3d12_full_graph PRIVATE /W4 /permissive-)
+        add_test(
+            NAME depth_pro_d3d12_full_graph
+            COMMAND depth_pro_d3d12_full_graph)
+        set_tests_properties(
+            depth_pro_d3d12_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     if(DEPTH_PRO_WITH_VULKAN)
         add_executable(
             depth_pro_gpu_full_graph_probe
