@@ -31,8 +31,9 @@ float read_weight(uint index) {
 }
 
 const uint inner_tile = 32;
-shared float input_tile[32 * inner_tile];
-shared float weight_tile[32 * inner_tile];
+const uint inner_stride = inner_tile + 1;
+shared float input_tile[32 * inner_stride];
+shared float weight_tile[32 * inner_stride];
 
 void main() {
     const uint kernel_area = parameters.kernel * parameters.kernel;
@@ -74,7 +75,8 @@ void main() {
                 gl_WorkGroupID.x * 32 + spatial_offset;
             const uint spatial =
                 parameters.spatial_offset + local_spatial;
-            input_tile[index] =
+            input_tile[
+                spatial_offset * inner_stride + index % inner_tile] =
                 batch < parameters.batches &&
                 local_spatial < parameters.spatial_count &&
                 spatial < input_spatial_count &&
@@ -92,7 +94,8 @@ void main() {
             const uint inner = inner_base + index % inner_tile;
             const uint output_channel =
                 gl_WorkGroupID.y * 32 + output_offset;
-            weight_tile[index] =
+            weight_tile[
+                output_offset * inner_stride + index % inner_tile] =
                 output_channel < parameters.output_channels &&
                 inner < parameters.input_channels
                 ? read_weight(
@@ -113,7 +116,7 @@ void main() {
                  ++spatial_offset) {
                 inputs[spatial_offset] = input_tile[
                     (gl_LocalInvocationID.x * 4 + spatial_offset) *
-                        inner_tile +
+                        inner_stride +
                     inner];
             }
             for (uint output_offset = 0;
@@ -121,7 +124,7 @@ void main() {
                  ++output_offset) {
                 weights[output_offset] = weight_tile[
                     (gl_LocalInvocationID.y * 4 + output_offset) *
-                        inner_tile +
+                        inner_stride +
                     inner];
             }
             for (uint output_offset = 0;

@@ -26,8 +26,9 @@ layout(push_constant) uniform Parameters {
     uint qkv_tokens;
 } parameters;
 
-shared float input_tile[64 * 16];
-shared float weight_tile[32 * 16];
+#define INNER_STRIDE 17
+shared float input_tile[64 * INNER_STRIDE];
+shared float weight_tile[32 * INNER_STRIDE];
 
 void main() {
     const uint column_base =
@@ -68,14 +69,16 @@ void main() {
                                 output_row) *
                                     parameters.qkv_embedding * 3 +
                             qkv_head * 64 + inner] * 0.125;
-                    input_tile[index] = scaled_query;
+                    input_tile[tile_row * INNER_STRIDE + index % 16] =
+                        scaled_query;
                 } else {
-                    input_tile[index] = input_buffer.data[
+                    input_tile[tile_row * INNER_STRIDE + index % 16] =
+                        input_buffer.data[
                         (batch * parameters.rows + output_row) *
                             parameters.inner + inner];
                 }
             } else {
-                input_tile[index] = 0.0;
+                input_tile[tile_row * INNER_STRIDE + index % 16] = 0.0;
             }
         }
         for (uint index = lane; index < 32 * 16; index += 64) {
@@ -95,14 +98,17 @@ void main() {
                         parameters.weight_qkv_kind == 1
                         ? inner
                         : output_column;
-                    weight_tile[index] = weight_buffer.data[
+                    weight_tile[
+                        tile_column * INNER_STRIDE + index % 16] =
+                        weight_buffer.data[
                         (qkv_frame * parameters.qkv_tokens + token) *
                             parameters.qkv_embedding * 3 +
                         parameters.weight_qkv_kind *
                             parameters.qkv_embedding +
                         qkv_head * 64 + feature];
                 } else {
-                    weight_tile[index] =
+                    weight_tile[
+                        tile_column * INNER_STRIDE + index % 16] =
                         parameters.weight_transposed != 0
                     ? weight_buffer.data[
                           (batch * parameters.columns + output_column) *
@@ -112,7 +118,8 @@ void main() {
                               parameters.columns + output_column];
                 }
             } else {
-                weight_tile[index] = 0.0;
+                weight_tile[
+                    tile_column * INNER_STRIDE + index % 16] = 0.0;
             }
         }
         barrier();
@@ -123,11 +130,13 @@ void main() {
             float weight_values[4];
             for (uint row = 0; row < 8; ++row) {
                 input_values[row] = input_tile[
-                    (gl_LocalInvocationID.y * 8 + row) * 16 + inner];
+                    (gl_LocalInvocationID.y * 8 + row) *
+                        INNER_STRIDE + inner];
             }
             for (uint column = 0; column < 4; ++column) {
                 weight_values[column] = weight_tile[
-                    (gl_LocalInvocationID.x * 4 + column) * 16 + inner];
+                    (gl_LocalInvocationID.x * 4 + column) *
+                        INNER_STRIDE + inner];
             }
             for (uint row = 0; row < 8; ++row) {
                 for (uint column = 0; column < 4; ++column) {
