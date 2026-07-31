@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +30,8 @@
 #include <vector>
 
 namespace {
+double maximum_submit_return_ms = 0.0;
+
 using Microsoft::WRL::ComPtr;
 
 void check(HRESULT value, const char* operation) {
@@ -179,6 +182,32 @@ void wait_fence(ID3D12Device* device, const ibrh_synchronization& ready) {
     CloseHandle(event);
 }
 
+double d3d12_heartbeat_fps(
+    ID3D12Device* device, ID3D12CommandQueue* queue) {
+    ComPtr<ID3D12Fence> fence;
+    check(device->CreateFence(
+        0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
+        "CreateFence(heartbeat)");
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event) throw std::runtime_error("CreateEvent(heartbeat) failed");
+    const auto start = std::chrono::steady_clock::now();
+    std::uint64_t value = 0u;
+    do {
+        check(queue->Signal(fence.Get(), ++value), "Signal(heartbeat)");
+        check(fence->SetEventOnCompletion(value, event),
+              "SetEventOnCompletion(heartbeat)");
+        if (WaitForSingleObject(event, 5000u) != WAIT_OBJECT_0) {
+            CloseHandle(event);
+            throw std::runtime_error("D3D12 heartbeat stalled for five seconds");
+        }
+    } while (std::chrono::duration<double>(
+                 std::chrono::steady_clock::now() - start).count() < 1.0);
+    const double seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    CloseHandle(event);
+    return static_cast<double>(value) / seconds;
+}
+
 std::vector<float> read_output(
     ID3D12Device* device, ID3D12CommandQueue* queue,
     const ibrh_output_descriptor& output) {
@@ -251,6 +280,7 @@ std::vector<float> read_output(
 
 struct SelectedDevice {
     ComPtr<ID3D12Device> device;
+    std::uint64_t luid = 0u;
     std::string luid_json;
     std::string name;
 };
@@ -283,6 +313,7 @@ SelectedDevice select_device(const ibrh_api& api) {
         check(D3D12CreateDevice(
             adapter.Get(), D3D_FEATURE_LEVEL_11_0,
             IID_PPV_ARGS(&result.device)), "D3D12CreateDevice");
+        std::memcpy(&result.luid, &description.AdapterLuid, sizeof(result.luid));
         result.luid_json = json;
         char narrow[128]{};
         WideCharToMultiByte(CP_UTF8, 0, description.Description, -1,
@@ -302,7 +333,8 @@ struct Submitted {
 Submitted submit(
     const ibrh_api& api, ibrh_model* model,
     Capture& capture, std::uint32_t width, std::uint32_t height,
-    std::uint64_t frame, const std::string& parameters) {
+    std::uint64_t frame, const std::string& parameters,
+    bool acquire_output = true) {
     ibrh_resource resource{};
     resource.struct_size = sizeof(resource);
     resource.api_version = IBRH_CURRENT_API_VERSION;
@@ -334,8 +366,16 @@ Submitted submit(
     request.timestamp_ns = 900000u + frame;
     request.parameters_json = {parameters.data(), parameters.size()};
     Submitted result;
+    const auto submit_start = std::chrono::steady_clock::now();
     const ibrh_result submit_result =
         api.submit(model, sizeof(request), &request, &result.job);
+    const double submit_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - submit_start).count();
+    maximum_submit_return_ms = std::max(maximum_submit_return_ms, submit_ms);
+    std::cout << "submit_ms=" << submit_ms << '\n';
+    if (submit_ms >= 5.0)
+        throw std::runtime_error(
+            "Depth Pro GPU submit exceeded the 5 ms async contract");
     if (submit_result != IBRH_OK) {
         char message[1024]{};
         size_t required = 0u;
@@ -346,6 +386,19 @@ Submitted submit(
             std::to_string(static_cast<unsigned>(submit_result)) + ")");
     }
     close_capture(capture);
+    if (!acquire_output) return result;
+    ibrh_job_status queued_status{};
+    for (std::uint32_t attempt = 0u; attempt < 10000u; ++attempt) {
+        check(api.job_poll(
+            result.job, sizeof(queued_status), &queued_status),
+            "job_poll(recording)");
+        if (queued_status.state != IBRH_JOB_QUEUED) break;
+        Sleep(1);
+    }
+    if (queued_status.state == IBRH_JOB_QUEUED ||
+        queued_status.state == IBRH_JOB_FAILED ||
+        queued_status.state == IBRH_JOB_CANCELLED)
+        throw std::runtime_error("Depth Pro asynchronous recording failed");
     check(api.output_acquire(
         result.job, 0, sizeof(result.output), &result.output, &result.lease),
         "output_acquire");
@@ -379,6 +432,8 @@ std::filesystem::path model_path() {
 }  // namespace
 
 int main() try {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
     const auto model_file = model_path();
     if (model_file.empty() || !std::filesystem::exists(model_file)) return 77;
     ibrh_api api{};
@@ -393,6 +448,12 @@ int main() try {
     SelectedDevice selected = select_device(api);
     std::cout << "device=" << selected.name
               << " luid=" << selected.luid_json << '\n';
+    {
+        depth_pro_native::VulkanContext scheduling_probe(0u, true);
+        if (scheduling_probe.adapter_luid() != selected.luid)
+            throw std::runtime_error(
+                "Depth Pro cooperative queue probe selected the wrong LUID");
+    }
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     ComPtr<ID3D12CommandQueue> queue;
@@ -699,6 +760,14 @@ int main() try {
             selected.device.Get(), queue.Get(), source, width, height);
         retained[index] = submit(
             api, model, capture, width, height, 1000u + index, parameters);
+        if (index == 0u) {
+            const double heartbeat_fps = d3d12_heartbeat_fps(
+                selected.device.Get(), queue.Get());
+            std::cout << "concurrentD3D12HeartbeatFps=" << heartbeat_fps << '\n';
+            if (heartbeat_fps < 200.0)
+                throw std::runtime_error(
+                    "Depth Pro GPU work starved the D3D12 render queue");
+        }
         wait_fence(selected.device.Get(), retained[index].output.ready);
         ibrh_job_status status{};
         for (std::uint32_t attempt = 0u; attempt < 1000u; ++attempt) {
@@ -755,15 +824,8 @@ int main() try {
     const auto reusable_handle = retained[0].output.resource.native_handle;
     api.output_release(retained[0].lease);
     retained[0].lease = nullptr;
-    Submitted reused;
-    dropped_request.parameters_json = {
-        parameters.data(), parameters.size()};
-    check(api.submit(model, sizeof(dropped_request), &dropped_request, &reused.job),
-          "submit(reuse)");
-    close_capture(dropped);
-    check(api.output_acquire(
-        reused.job, 0, sizeof(reused.output), &reused.output, &reused.lease),
-        "output_acquire(reuse)");
+    Submitted reused = submit(
+        api, model, dropped, width, height, 1003u, parameters);
     if (reused.output.resource.native_handle != reusable_handle)
         throw std::runtime_error("Depth Pro output slot handle was not reused");
     wait_fence(selected.device.Get(), reused.output.ready);
@@ -795,16 +857,18 @@ int main() try {
     api.output_release(retained[1].lease);
     retained[1].lease = nullptr;
     Submitted cancelled = submit(
-        api, model, blocked, width, height, 2000u, parameters);
+        api, model, blocked, width, height, 2000u, parameters, false);
+    // Make the imported producer wait runnable before cancelling. Cancellation
+    // remains a job-state/lifetime test; leaving an external fence deliberately
+    // unsignalled exercises driver-specific semaphore abandonment instead.
+    check(queue->Signal(blocked.fence.Get(), blocked.value),
+          "Signal(cancelled input)");
     check(api.job_cancel(cancelled.job), "job_cancel");
     ibrh_job_status cancelled_status{};
     check(api.job_poll(cancelled.job, sizeof(cancelled_status), &cancelled_status),
           "job_poll(cancelled)");
     if (cancelled_status.state != IBRH_JOB_CANCELLED)
         throw std::runtime_error("Depth Pro cancellation state failed");
-    check(queue->Signal(blocked.fence.Get(), blocked.value),
-          "Signal(cancelled input)");
-    api.output_release(cancelled.lease);
     api.job_release(cancelled.job);
 
     api.output_release(retained[2].lease);
@@ -824,7 +888,8 @@ int main() try {
     api.output_release(final_job.lease);
     std::cout << "Depth Pro " << (learned_fov ? "learned" : "forced")
               << "-FOV common D3D12/Vulkan full graph passed; zero transfers; "
-                 "three leases; reuse; cancellation; shutdown lease\n";
+                 "three leases; reuse; cancellation; shutdown lease; "
+              << "maximumSubmitReturnMs=" << maximum_submit_return_ms << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

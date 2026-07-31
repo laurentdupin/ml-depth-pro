@@ -8,16 +8,29 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <memory>
 #include <new>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+class DepthProGpuWorker;
+struct DepthProGpuAdmission;
 
 struct ibrh_runtime {
     std::string error;
@@ -31,6 +44,9 @@ struct ibrh_model {
     std::string model_path;
 #if defined(DEPTH_PRO_WITH_VULKAN)
     std::shared_ptr<depth_pro_native::ExternalGpu> external_gpu;
+    std::shared_ptr<DepthProGpuWorker> gpu_worker;
+    std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
+        std::make_shared<std::atomic<uint32_t>>(0u);
 #endif
     float forced_fov_degrees = 63.0f;
     std::mutex submit_mutex;
@@ -39,19 +55,39 @@ struct ibrh_model {
 struct ibrh_job {
     std::atomic<uint32_t> references{1u};
 #if defined(DEPTH_PRO_WITH_VULKAN)
+    mutable std::mutex gpu_mutex;
     std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+    std::shared_ptr<DepthProGpuAdmission> gpu_admission;
+    std::weak_ptr<DepthProGpuWorker> gpu_worker;
+    std::atomic<uint32_t> gpu_state{IBRH_JOB_QUEUED};
+    std::atomic<bool> cancel_requested{false};
+    std::string gpu_error;
+    std::uintptr_t input_texture_handle = 0u;
+    std::uintptr_t input_fence_handle = 0u;
+    std::uint64_t input_fence_value = 0u;
 #endif
     uint64_t source_frame_id = 0u;
     uint64_t timestamp_ns = 0u;
     uint32_t width = 0u;
     uint32_t height = 0u;
     std::vector<float> depth;
+    ~ibrh_job() {
+#if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
+        gpu_job.reset();
+        gpu_admission.reset();
+        if (input_texture_handle != 0u)
+            CloseHandle(reinterpret_cast<HANDLE>(input_texture_handle));
+        if (input_fence_handle != 0u)
+            CloseHandle(reinterpret_cast<HANDLE>(input_fence_handle));
+#endif
+    }
 };
 
 struct ibrh_output_lease {
     ibrh_job* job = nullptr;
 #if defined(DEPTH_PRO_WITH_VULKAN)
     std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+    std::shared_ptr<DepthProGpuAdmission> gpu_admission;
 #endif
 };
 
@@ -59,7 +95,7 @@ namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.depth-pro.native";
-constexpr char kHarnessVersion[] = "1.1.0";
+constexpr char kHarnessVersion[] = "1.2.0";
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -206,6 +242,146 @@ void release_job(ibrh_job* job) {
     if (job != nullptr && job->references.fetch_sub(1u) == 1u) delete job;
 }
 
+} // namespace
+
+#if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
+void close_gpu_input_handles(ibrh_job& job) noexcept {
+    const auto texture = reinterpret_cast<HANDLE>(
+        std::exchange(job.input_texture_handle, 0u));
+    const auto fence = reinterpret_cast<HANDLE>(
+        std::exchange(job.input_fence_handle, 0u));
+    if (texture != nullptr) CloseHandle(texture);
+    if (fence != nullptr) CloseHandle(fence);
+}
+
+struct DepthProGpuAdmission {
+    explicit DepthProGpuAdmission(
+        std::shared_ptr<std::atomic<uint32_t>> value)
+        : count(std::move(value)) {}
+    ~DepthProGpuAdmission() { count->fetch_sub(1u); }
+    std::shared_ptr<std::atomic<uint32_t>> count;
+};
+
+class DepthProGpuWorker {
+public:
+    explicit DepthProGpuWorker(
+        std::shared_ptr<depth_pro_native::ExternalGpu> external)
+        : external_(std::move(external)), thread_([this] { run(); }) {}
+    ~DepthProGpuWorker() { stop(); }
+
+    void enqueue(ibrh_job* job) {
+        retain_job(job);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                release_job(job);
+                throw std::runtime_error("Depth Pro GPU worker is stopping");
+            }
+            queue_.push_back(job);
+        }
+        condition_.notify_one();
+    }
+
+    bool cancel_queued(ibrh_job* job) noexcept {
+        bool removed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto queued = std::find(queue_.begin(), queue_.end(), job);
+            if (queued != queue_.end()) {
+                queue_.erase(queued);
+                removed = true;
+            }
+        }
+        if (removed) {
+            job->cancel_requested.store(true);
+            job->gpu_state.store(IBRH_JOB_CANCELLED);
+            close_gpu_input_handles(*job);
+            release_job(job);
+        }
+        return removed;
+    }
+
+    void stop() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    void run() noexcept {
+        for (;;) {
+            ibrh_job* job = nullptr;
+            bool stop_requested = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [&] {
+                    return stopping_ || !queue_.empty();
+                });
+                if (queue_.empty()) {
+                    if (stopping_) return;
+                    continue;
+                }
+                job = queue_.front();
+                queue_.pop_front();
+                stop_requested = stopping_;
+            }
+            if (stop_requested || job->cancel_requested.load()) {
+                job->gpu_state.store(IBRH_JOB_CANCELLED);
+                close_gpu_input_handles(*job);
+                release_job(job);
+                continue;
+            }
+            try {
+                auto native = external_->submit_texture({
+                    job->input_texture_handle,
+                    job->width,
+                    job->height,
+                    job->input_fence_handle,
+                    job->input_fence_value,
+                    job->source_frame_id,
+                    job->timestamp_ns});
+                close_gpu_input_handles(*job);
+                if (job->cancel_requested.load()) native->cancel();
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_job = std::move(native);
+                }
+                job->gpu_state.store(
+                    job->cancel_requested.load() ?
+                        IBRH_JOB_CANCELLED : IBRH_JOB_RUNNING);
+            } catch (const std::exception& error) {
+                close_gpu_input_handles(*job);
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_error = error.what();
+                }
+                job->gpu_state.store(
+                    job->cancel_requested.load() ?
+                        IBRH_JOB_CANCELLED : IBRH_JOB_FAILED);
+            } catch (...) {
+                close_gpu_input_handles(*job);
+                job->gpu_state.store(IBRH_JOB_FAILED);
+            }
+            release_job(job);
+        }
+    }
+
+    std::shared_ptr<depth_pro_native::ExternalGpu> external_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<ibrh_job*> queue_;
+    bool stopping_ = false;
+    std::thread thread_;
+};
+#else
+struct DepthProGpuAdmission {};
+#endif
+
+namespace {
+
 ibrh_result IBRH_CALL query_capabilities(
     size_t capabilities_size, ibrh_capabilities* capabilities) {
     if (capabilities == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
@@ -337,6 +513,8 @@ ibrh_result IBRH_CALL model_load(
                 capabilities.adapter_luid != runtime->adapter_luid)
                 throw std::runtime_error(
                     "Depth Pro loaded on a GPU other than the requested LUID");
+            model->gpu_worker = std::make_shared<DepthProGpuWorker>(
+                model->external_gpu);
         } catch (const std::exception& error) {
             delete model;
             return fail(runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY, error.what());
@@ -363,6 +541,10 @@ ibrh_result IBRH_CALL model_load(
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
 #if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(_WIN32)
+    if (model->gpu_worker) model->gpu_worker->stop();
+#endif
+    model->gpu_worker.reset();
     model->external_gpu.reset();
 #endif
     depth_pro_destroy(model->context);
@@ -428,8 +610,56 @@ ibrh_result IBRH_CALL submit(
         if (wait == nullptr || wait->native_handle == 0u)
             return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                         "Depth Pro D3D12 input requires a wait fence");
+        HANDLE texture_copy = nullptr;
+        HANDLE fence_copy = nullptr;
+        const HANDLE process = GetCurrentProcess();
+        if (!DuplicateHandle(
+                process, reinterpret_cast<HANDLE>(input.native_handle),
+                process, &texture_copy, 0, FALSE,
+                DUPLICATE_SAME_ACCESS) ||
+            !DuplicateHandle(
+                process, reinterpret_cast<HANDLE>(wait->native_handle),
+                process, &fence_copy, 0, FALSE,
+                DUPLICATE_SAME_ACCESS)) {
+            if (texture_copy != nullptr) CloseHandle(texture_copy);
+            if (fence_copy != nullptr) CloseHandle(fence_copy);
+            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                        "Depth Pro could not retain GPU input handles");
+        }
+        uint32_t admitted = model->gpu_admissions->load();
+        while (admitted < 3u &&
+               !model->gpu_admissions->compare_exchange_weak(
+                   admitted, admitted + 1u)) {}
+        if (admitted >= 3u) {
+            CloseHandle(texture_copy);
+            CloseHandle(fence_copy);
+            return fail(model->runtime, IBRH_ERROR_INVALID_STATE,
+                        "all Depth Pro GPU output leases are occupied");
+        }
         auto* job = new (std::nothrow) ibrh_job();
-        if (job == nullptr) return IBRH_ERROR_INTERNAL;
+        if (job == nullptr) {
+            model->gpu_admissions->fetch_sub(1u);
+            CloseHandle(texture_copy);
+            CloseHandle(fence_copy);
+            return IBRH_ERROR_INTERNAL;
+        }
+        job->input_texture_handle =
+            reinterpret_cast<std::uintptr_t>(texture_copy);
+        job->input_fence_handle =
+            reinterpret_cast<std::uintptr_t>(fence_copy);
+        job->input_fence_value = wait->value;
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = input.width;
+        job->height = input.height;
+        try {
+            job->gpu_admission = std::make_shared<DepthProGpuAdmission>(
+                model->gpu_admissions);
+        } catch (...) {
+            model->gpu_admissions->fetch_sub(1u);
+            delete job;
+            return IBRH_ERROR_INTERNAL;
+        }
         try {
             std::lock_guard<std::mutex> lock(model->submit_mutex);
             if (!model->external_gpu) {
@@ -445,26 +675,16 @@ ibrh_result IBRH_CALL submit(
                      capabilities.adapter_luid != model->runtime->adapter_luid))
                     throw std::runtime_error(
                         "Depth Pro GPU does not match the requested LUID");
+                model->gpu_worker = std::make_shared<DepthProGpuWorker>(
+                    model->external_gpu);
             }
-            job->gpu_job = model->external_gpu->submit_texture({
-                input.native_handle, input.width, input.height,
-                wait->native_handle, wait->value,
-                request->source_frame_id, request->timestamp_ns});
-        } catch (const depth_pro_native::GpuSlotsExhausted& error) {
-            delete job;
-            return fail(model->runtime, IBRH_ERROR_INVALID_STATE, error.what());
-        } catch (const std::invalid_argument& error) {
-            delete job;
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT, error.what());
+            job->gpu_worker = model->gpu_worker;
+            model->gpu_worker->enqueue(job);
         } catch (const std::exception& error) {
             delete job;
             return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
                         error.what());
         }
-        job->source_frame_id = request->source_frame_id;
-        job->timestamp_ns = request->timestamp_ns;
-        job->width = input.width;
-        job->height = input.height;
         *output = job;
         return IBRH_OK;
 #endif
@@ -545,18 +765,30 @@ ibrh_result IBRH_CALL job_poll(
     *status = {};
     status->struct_size = sizeof(*status);
 #if defined(DEPTH_PRO_WITH_VULKAN)
-    if (job->gpu_job) {
-        switch (job->gpu_job->state()) {
-            case depth_pro_native::ExternalJobState::running:
-                status->state = IBRH_JOB_RUNNING; break;
-            case depth_pro_native::ExternalJobState::complete:
-                status->state = IBRH_JOB_COMPLETE; break;
-            case depth_pro_native::ExternalJobState::cancelled:
-                status->state = IBRH_JOB_CANCELLED; break;
+    if (job->gpu_admission) {
+        std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+        {
+            std::lock_guard<std::mutex> lock(job->gpu_mutex);
+            gpu_job = job->gpu_job;
         }
-    } else
-#endif
+        if (gpu_job) {
+            switch (gpu_job->state()) {
+                case depth_pro_native::ExternalJobState::running:
+                    status->state = IBRH_JOB_RUNNING; break;
+                case depth_pro_native::ExternalJobState::complete:
+                    status->state = IBRH_JOB_COMPLETE; break;
+                case depth_pro_native::ExternalJobState::cancelled:
+                    status->state = IBRH_JOB_CANCELLED; break;
+            }
+        } else {
+            status->state = job->gpu_state.load();
+        }
+    } else {
+        status->state = IBRH_JOB_COMPLETE;
+    }
+#else
     status->state = IBRH_JOB_COMPLETE;
+#endif
     status->output_count = 1u;
     status->source_frame_id = job->source_frame_id;
     return IBRH_OK;
@@ -565,8 +797,23 @@ ibrh_result IBRH_CALL job_poll(
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(DEPTH_PRO_WITH_VULKAN)
-    if (job->gpu_job) {
-        job->gpu_job->cancel();
+    job->cancel_requested.store(true);
+    if (auto worker = job->gpu_worker.lock();
+        worker && worker->cancel_queued(job))
+        return IBRH_OK;
+    std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+    {
+        std::lock_guard<std::mutex> lock(job->gpu_mutex);
+        gpu_job = job->gpu_job;
+    }
+    if (gpu_job) {
+        gpu_job->cancel();
+        job->gpu_state.store(IBRH_JOB_CANCELLED);
+        return IBRH_OK;
+    }
+    const uint32_t state = job->gpu_state.load();
+    if (state == IBRH_JOB_QUEUED || state == IBRH_JOB_RUNNING) {
+        job->gpu_state.store(IBRH_JOB_CANCELLED);
         return IBRH_OK;
     }
 #endif
@@ -589,11 +836,24 @@ ibrh_result IBRH_CALL output_acquire(
     auto* lease = new (std::nothrow) ibrh_output_lease();
     if (lease == nullptr) return IBRH_ERROR_INTERNAL;
 #if defined(DEPTH_PRO_WITH_VULKAN)
-    if (job->gpu_job) {
+    if (job->gpu_admission) {
+        std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+        {
+            std::lock_guard<std::mutex> lock(job->gpu_mutex);
+            gpu_job = job->gpu_job;
+        }
+        if (!gpu_job) {
+            delete lease;
+            const uint32_t state = job->gpu_state.load();
+            if (state == IBRH_JOB_CANCELLED) return IBRH_ERROR_CANCELLED;
+            if (state == IBRH_JOB_FAILED) return IBRH_ERROR_INTERNAL;
+            return IBRH_ERROR_INVALID_STATE;
+        }
         depth_pro_native::ExternalTextureOutput native{};
-        try { native = job->gpu_job->output(); }
+        try { native = gpu_job->output(); }
         catch (...) { delete lease; return IBRH_ERROR_CANCELLED; }
-        lease->gpu_job = job->gpu_job;
+        lease->gpu_job = std::move(gpu_job);
+        lease->gpu_admission = job->gpu_admission;
         *descriptor = {};
         descriptor->struct_size = sizeof(*descriptor);
         descriptor->api_version = IBRH_CURRENT_API_VERSION;
@@ -658,6 +918,10 @@ ibrh_result IBRH_CALL output_acquire(
 
 void IBRH_CALL output_release(ibrh_output_lease* lease) {
     if (lease == nullptr) return;
+#if defined(DEPTH_PRO_WITH_VULKAN)
+    lease->gpu_job.reset();
+    lease->gpu_admission.reset();
+#endif
     release_job(lease->job);
     delete lease;
 }

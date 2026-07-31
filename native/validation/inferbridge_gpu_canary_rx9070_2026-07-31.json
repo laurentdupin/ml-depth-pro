@@ -44,6 +44,13 @@
     "cancellation": true,
     "leaseSurvivesModelAndRuntimeShutdown": true
   },
+  "responsiveness": {
+    "asynchronousHarnessSubmit": true,
+    "maximumSubmitReturnMs": 0.0189,
+    "requiredMaximumSubmitReturnMs": 5.0,
+    "minimumConcurrentD3D12HeartbeatFps": 47313.8,
+    "requiredMinimumConcurrentD3D12HeartbeatFps": 200.0
+  },
   "transfers": {
     "tensorUploadByteDeltaPerFrame": 0,
     "tensorDownloadByteDeltaPerFrame": 0,

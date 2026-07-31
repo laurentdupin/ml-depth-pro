@@ -246,6 +246,10 @@ public:
                  std::make_shared<GpuSlot>()}
 #endif
           {
+        // Deferred asynchronous recording cannot benchmark kernels by host
+        // call duration. Select the conservative universally-correct kernel
+        // shape and avoid launching the synchronous tuner's extra workloads.
+        gpu_model_.set_linear_tuning(false, false, 0u);
         const std::vector<float> zeros(1024u, 0.0f);
         context_.upload(zero_, zeros.data(), zeros.size() * sizeof(float));
         if (forced_fov_degrees_ > 0.0f) {
