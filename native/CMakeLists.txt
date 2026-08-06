@@ -82,6 +82,7 @@ add_library(depth_pro_core STATIC
     src/model.cpp
     src/encoder_cpu.cpp
     src/graph_cpu.cpp)
+set_target_properties(depth_pro_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(depth_pro_core PUBLIC src)
 
 add_library(depth_pro_model SHARED

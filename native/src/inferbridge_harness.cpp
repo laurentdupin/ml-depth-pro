@@ -581,9 +581,11 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(DEPTH_PRO_WITH_VULKAN)
     job->cancel_requested.store(true);
+#if defined(_WIN32)
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job))
         return IBRH_OK;
+#endif
     std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
     {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
