@@ -37,6 +37,7 @@ struct ibrh_runtime {
     std::string error;
     int32_t vulkan_device_index = 0;
     uint64_t adapter_luid = 0u;
+    bool force_host_transfers = false;
 };
 
 struct ibrh_model {
@@ -414,6 +415,10 @@ ibrh_result IBRH_CALL runtime_create(
     auto* runtime = new (std::nothrow) ibrh_runtime();
     if (runtime == nullptr) return IBRH_ERROR_INTERNAL;
     const std::string device = copy_string(request->requested_device_json);
+    std::string transfer_mode;
+    runtime->force_host_transfers =
+        json_string(device, "transfer_mode", transfer_mode) &&
+        transfer_mode == "host";
     uint32_t index = 0u;
     float parsed_index = 0.0f;
     if (json_float(device, "index", parsed_index)) {
@@ -483,7 +488,7 @@ ibrh_result IBRH_CALL model_load(
             "Depth Pro FOV parameters are invalid");
     }
 #if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
-    if (runtime->adapter_luid != 0u) {
+    if (runtime->adapter_luid != 0u && !runtime->force_host_transfers) {
         try {
             model->external_gpu = depth_pro_native::create_external_gpu(
                 path, model->forced_fov_degrees,
