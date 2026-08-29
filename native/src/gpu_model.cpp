@@ -1,5 +1,7 @@
 #include "gpu_model.h"
 
+#include <inferbridge/native_harness_precision.h>
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -22,6 +24,13 @@ bool is_large_weight(std::string_view name) {
 }  // namespace
 
 GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
+    const auto precision = inferbridge::native::require_supported_precision(
+        inferbridge::native::requested_precision(),
+        {context.supports_float16(), context.supports_packed_int8_dot()},
+        context.supports_float16() ? inferbridge::native::Precision::fp16
+                                   : inferbridge::native::Precision::fp32);
+    uses_half_weights_ = precision == inferbridge::native::Precision::fp16;
+    uses_int8_weights_ = precision == inferbridge::native::Precision::int8;
     tensors_.reserve(model.tensor_count());
     for (std::string_view name : model.tensor_names()) {
         const TensorView& source = model.tensor(name);
@@ -34,11 +43,30 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
         GpuTensor destination{
             {},
             {},
+            {},
+            {},
             source.dimensions,
             source.rank,
             source.elements,
         };
-        if (is_large_weight(name)) {
+        if (is_large_weight(name) && uses_int8_weights_ &&
+            source.rank == 2 && source.dimensions[1] % 4u == 0u) {
+            std::vector<float> decoded(
+                static_cast<std::size_t>(source.elements));
+            for (std::size_t index = 0; index < decoded.size(); ++index)
+                decoded[index] = half_to_float(source.data[index]);
+            const auto quantized = inferbridge::native::quantize_int8_rows(
+                decoded.data(), static_cast<std::size_t>(source.dimensions[0]),
+                static_cast<std::size_t>(source.dimensions[1]));
+            destination.int8_buffer = context.create_device_buffer(
+                quantized.packed.size() * sizeof(std::uint32_t));
+            destination.int8_scales = context.create_device_buffer(
+                quantized.scales.size() * sizeof(float));
+            context.upload(destination.int8_buffer, quantized.packed.data(),
+                quantized.packed.size() * sizeof(std::uint32_t));
+            context.upload(destination.int8_scales, quantized.scales.data(),
+                quantized.scales.size() * sizeof(float));
+        } else if (is_large_weight(name) && uses_half_weights_) {
             const std::size_t packed_bytes =
                 static_cast<std::size_t>((source.elements + 1) / 2) *
                 sizeof(std::uint32_t);

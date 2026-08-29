@@ -13,6 +13,8 @@ namespace depth_pro_native {
 struct GpuTensor {
     VulkanBuffer buffer;
     VulkanBuffer half_buffer;
+    VulkanBuffer int8_buffer;
+    VulkanBuffer int8_scales;
     std::array<std::uint64_t, 4> dimensions{};
     std::uint32_t rank = 0;
     std::uint64_t elements = 0;
@@ -23,6 +25,8 @@ public:
     GpuModel(const ModelFile& model, VulkanContext& context);
 
     const GpuTensor& tensor(std::string_view name) const;
+    bool uses_half_weights() const { return uses_half_weights_; }
+    bool uses_int8_weights() const { return uses_int8_weights_; }
     std::size_t tensor_count() const { return tensors_.size(); }
     bool linear_tuned() const { return linear_tuned_; }
     bool linear_block16() const { return linear_block16_; }
@@ -42,6 +46,8 @@ public:
 
 private:
     std::unordered_map<std::string_view, GpuTensor> tensors_;
+    bool uses_half_weights_ = false;
+    bool uses_int8_weights_ = false;
     bool linear_tuned_ = false;
     bool linear_block16_ = false;
     bool linear_vectorized_ = false;

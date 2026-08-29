@@ -100,9 +100,11 @@ std::vector<float> crop_host(
 
 const VulkanBuffer& weight(
     const GpuModel& model, const std::string& name) {
-    const VulkanBuffer& result = model.tensor(name).half_buffer;
+    const GpuTensor& tensor = model.tensor(name);
+    const VulkanBuffer& result = model.uses_half_weights()
+        ? tensor.half_buffer : tensor.buffer;
     if (result.handle() == VK_NULL_HANDLE) {
-        throw std::runtime_error("expected FP16 GPU weight: " + name);
+        throw std::runtime_error("expected GPU weight: " + name);
     }
     return result;
 }
@@ -114,6 +116,25 @@ const VulkanBuffer& value(
         throw std::runtime_error("expected FP32 GPU tensor: " + name);
     }
     return result;
+}
+
+void linear_model(
+    GpuModel& model, VulkanOperators& operators,
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const std::string& weight_name, const std::string& bias_name,
+    std::uint32_t rows, std::uint32_t input_columns,
+    std::uint32_t output_columns) {
+    const GpuTensor& tensor = model.tensor(weight_name);
+    if (model.uses_int8_weights() &&
+        tensor.int8_buffer.handle() != VK_NULL_HANDLE) {
+        operators.linear_int8(output, input, tensor.int8_buffer,
+            tensor.int8_scales, value(model, bias_name), rows,
+            input_columns, output_columns);
+    } else {
+        operators.linear(output, input, weight(model, weight_name),
+            value(model, bias_name), rows, input_columns, output_columns,
+            false, true, model.uses_half_weights());
+    }
 }
 
 Feature conv(
@@ -147,7 +168,8 @@ Feature conv(
         output.buffer, input.buffer, weight(model, weight_name),
         bias_name.empty() ? zero : value(model, bias_name),
         input.width, input.height, input.channels, output_channels,
-        kernel, stride, padding, !bias_name.empty(), true, true);
+        kernel, stride, padding, !bias_name.empty(), true,
+        model.uses_half_weights());
     return output;
 }
 
@@ -177,7 +199,7 @@ Feature deconv(
         output.buffer, input.buffer, weight(model, weight_name),
         bias_name.empty() ? zero : value(model, bias_name),
         input.width, input.height, input.channels, output_channels,
-        kernel, true);
+        kernel, model.uses_half_weights());
     return output;
 }
 
@@ -496,11 +518,9 @@ GpuDeviceInferenceOutput infer_gpu_device(
             elements(128, 24, 24) * sizeof(float)), 128, 24, 24};
     VulkanBuffer fov_projected = context.create_device_buffer(
         std::uint64_t(577) * 128 * sizeof(float));
-    operators.linear(
-        fov_projected, fov_encoded.final,
-        weight(model, "fov.encoder.1.weight"),
-        value(model, "fov.encoder.1.bias"),
-        577, 1024, 128, false, true, true);
+    linear_model(model, operators, fov_projected, fov_encoded.final,
+        "fov.encoder.1.weight", "fov.encoder.1.bias",
+        577, 1024, 128);
     operators.tokens_to_nchw(
         fov_tokens.buffer, fov_projected, 128);
     fov = conv(

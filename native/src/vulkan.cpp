@@ -230,6 +230,37 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
     device_name_ = properties.deviceName;
+    VkPhysicalDeviceShaderFloat16Int8Features float16_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+    };
+    VkPhysicalDevice16BitStorageFeatures storage16_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+        &float16_features,
+    };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+    };
+    float16_features.pNext = &integer_dot_features;
+    VkPhysicalDeviceFeatures2 precision_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        &storage16_features,
+    };
+    vkGetPhysicalDeviceFeatures2(physical_device_, &precision_features);
+    float16_supported_ =
+        storage16_features.storageBuffer16BitAccess == VK_TRUE &&
+        float16_features.shaderFloat16 == VK_TRUE;
+    VkPhysicalDeviceShaderIntegerDotProductProperties integer_dot_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 integer_dot_properties2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &integer_dot_properties,
+    };
+    vkGetPhysicalDeviceProperties2(physical_device_, &integer_dot_properties2);
+    packed_int8_dot_supported_ =
+        integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
+        integer_dot_properties
+            .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -404,9 +435,31 @@ VulkanContext::VulkanContext(
         1,
         &priority,
     };
+    VkPhysicalDeviceShaderFloat16Int8Features enabled_float16{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+        nullptr,
+        float16_supported_ ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
+    };
+    VkPhysicalDevice16BitStorageFeatures enabled_storage16{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+        float16_supported_ ? &enabled_float16 : nullptr,
+        float16_supported_ ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
+        VK_FALSE,
+        VK_FALSE,
+    };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures enabled_integer_dot{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+        nullptr,
+        packed_int8_dot_supported_ ? VK_TRUE : VK_FALSE,
+    };
+    enabled_float16.pNext = &enabled_integer_dot;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        nullptr,
+        float16_supported_ ? static_cast<void*>(&enabled_storage16)
+        : packed_int8_dot_supported_
+        ? static_cast<void*>(&enabled_integer_dot) : nullptr,
         0,
         1,
         &queue_info,

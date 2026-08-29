@@ -76,6 +76,13 @@ if(DEPTH_PRO_WITH_VULKAN)
             pyramid_patches write_depth_image)
         depth_pro_compile_shader(${SHADER})
     endforeach()
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX dpro
+            GENERATED_DIR "${DEPTH_PRO_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR DEPTH_PRO_SHADER_HEADERS)
+    endforeach()
 endif()
 
 add_library(depth_pro_core STATIC

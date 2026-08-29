@@ -176,6 +176,10 @@ public:
     ~VulkanContext();
 
     const std::string& device_name() const { return device_name_; }
+    bool supports_float16() const { return float16_supported_; }
+    bool supports_packed_int8_dot() const {
+        return packed_int8_dot_supported_;
+    }
     VkDeviceSize device_local_memory_bytes() const {
         return device_local_memory_bytes_;
     }
@@ -424,6 +428,8 @@ private:
     VkDeviceSize pooled_device_bytes_ = 0;
     VkDeviceSize pooled_host_bytes_ = 0;
     VulkanExternalCapabilities external_capabilities_{};
+    bool float16_supported_ = false;
+    bool packed_int8_dot_supported_ = false;
 #if defined(_WIN32)
     std::uint64_t adapter_luid_ = 0;
     PFN_vkGetMemoryWin32HandlePropertiesKHR

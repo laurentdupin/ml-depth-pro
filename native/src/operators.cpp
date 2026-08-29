@@ -31,6 +31,9 @@
 #include "linear_vec8_half_spv.h"
 #include "linear_vec16_spv.h"
 #include "linear_vec16_half_spv.h"
+#include "linear_int8_tiled_spv.h"
+#include "quantize_rows_int8_spv.h"
+#include "inferbridge/native_harness_precision.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -115,6 +118,20 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       linear_vec16_half_(context.create_pipeline(
           dpro_linear_vec16_half_spv,
           dpro_linear_vec16_half_spv_size, 4, 12)),
+      quantize_rows_int8_(
+          context.supports_packed_int8_dot() &&
+              inferbridge::native::requested_precision() ==
+                  inferbridge::native::Precision::int8
+          ? context.create_pipeline(dpro_quantize_rows_int8_spv,
+                dpro_quantize_rows_int8_spv_size, 3, 4)
+          : VulkanPipeline{}),
+      linear_int8_tiled_(
+          context.supports_packed_int8_dot() &&
+              inferbridge::native::requested_precision() ==
+                  inferbridge::native::Precision::int8
+          ? context.create_pipeline(dpro_linear_int8_tiled_spv,
+                dpro_linear_int8_tiled_spv_size, 6, 28)
+          : VulkanPipeline{}),
       gelu_(context.create_pipeline(
           dpro_gelu_spv, dpro_gelu_spv_size, 2, 8)),
       layer_norm_(context.create_pipeline(
@@ -272,6 +289,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_vec8_half_.set_debug_name("linear_vec8_half");
     linear_vec16_.set_debug_name("linear_vec16");
     linear_vec16_half_.set_debug_name("linear_vec16_half");
+    if (context.supports_packed_int8_dot() &&
+        inferbridge::native::requested_precision() ==
+            inferbridge::native::Precision::int8) {
+        quantize_rows_int8_.set_debug_name("quantize_rows_int8");
+        linear_int8_tiled_.set_debug_name("linear_int8_tiled");
+    }
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -449,6 +472,45 @@ void VulkanOperators::reciprocal_depth(
     context_.dispatch(
         reciprocal_depth_, {&output, &input},
         &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::linear_int8(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const VulkanBuffer& packed_weight, const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias, std::uint32_t rows,
+    std::uint32_t input_columns, std::uint32_t output_columns, bool gelu) {
+    if (!context_.supports_packed_int8_dot() || input_columns % 4u != 0u)
+        throw std::runtime_error("accelerated packed INT8 linear is unavailable");
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        std::uint64_t(rows) * (input_columns / 4u) * sizeof(std::uint32_t));
+    VulkanBuffer input_scales = context_.create_device_buffer(
+        std::uint64_t(rows) * sizeof(float));
+    context_.dispatch(quantize_rows_int8_,
+        {&input, &packed_input, &input_scales},
+        &input_columns, sizeof(input_columns), rows);
+    const std::uint32_t parameters[7] = {
+        rows, input_columns, output_columns, 0u, output_columns, 0u, 1u};
+    context_.dispatch(linear_int8_tiled_,
+        {&output, &packed_input, &packed_weight, &input_scales,
+         &weight_scales, &bias}, parameters, sizeof(parameters),
+        divide_up(output_columns, 64u), divide_up(rows, 56u));
+    if (gelu) {
+        struct GeluParameters {
+            std::uint32_t count;
+            std::uint32_t offset;
+        };
+        constexpr std::uint32_t maximum_elements = 65535u * 256u;
+        const std::uint32_t count = rows * output_columns;
+        for (std::uint32_t offset = 0; offset < count;
+             offset += maximum_elements) {
+            const GeluParameters gelu_parameters{
+                std::min(maximum_elements, count - offset), offset};
+            context_.dispatch(
+                gelu_, {&output, &output}, &gelu_parameters,
+                sizeof(gelu_parameters),
+                divide_up(gelu_parameters.count, 256u));
+        }
+    }
 }
 
 void VulkanOperators::linear(

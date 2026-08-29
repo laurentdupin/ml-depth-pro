@@ -26,13 +26,35 @@ const VulkanBuffer& fp32(
     return result;
 }
 
-const VulkanBuffer& fp16(
+const VulkanBuffer& weight(
     const GpuModel& model, const std::string& name) {
-    const VulkanBuffer& result = model.tensor(name).half_buffer;
+    const GpuTensor& tensor = model.tensor(name);
+    const VulkanBuffer& result = model.uses_half_weights()
+        ? tensor.half_buffer : tensor.buffer;
     if (result.handle() == VK_NULL_HANDLE) {
-        throw std::runtime_error("expected FP16 GPU tensor: " + name);
+        throw std::runtime_error("expected GPU weight: " + name);
     }
     return result;
+}
+
+void linear_model(
+    GpuModel& model, VulkanOperators& operators,
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const std::string& weight_name, const std::string& bias_name,
+    std::uint32_t rows, std::uint32_t input_columns,
+    std::uint32_t output_columns, bool gelu = false) {
+    const GpuTensor& tensor = model.tensor(weight_name);
+    if (model.uses_int8_weights() &&
+        tensor.int8_buffer.handle() != VK_NULL_HANDLE) {
+        operators.linear_int8(output, input, tensor.int8_buffer,
+            tensor.int8_scales, fp32(model, bias_name), rows,
+            input_columns, output_columns, gelu);
+    } else {
+        operators.linear(output, input, weight(model, weight_name),
+            fp32(model, bias_name), rows, input_columns, output_columns,
+            gelu, model.linear_block16(), model.uses_half_weights(),
+            model.linear_vectorized(), model.linear_vector_tile());
+    }
 }
 
 }  // namespace
@@ -73,7 +95,9 @@ GpuEncoderOutput encoder_gpu(
             batches);
     });
 
-    if (!model.linear_tuned()) {
+    if (!model.linear_tuned() && model.uses_int8_weights()) {
+        model.set_linear_tuning(false, false, 0);
+    } else if (!model.linear_tuned()) {
         const std::string base = prefix + "blocks.0.";
         operators.layer_norm(
             normalized, current,
@@ -97,10 +121,10 @@ GpuEncoderOutput encoder_gpu(
             const auto start = std::chrono::steady_clock::now();
             operators.linear(
                 qkv, normalized,
-                fp16(model, base + "attn.qkv.weight"),
+                weight(model, base + "attn.qkv.weight"),
                 fp32(model, base + "attn.qkv.bias"),
                 rows, embedding, embedding * 3,
-                false, candidate.block16, true,
+                false, candidate.block16, model.uses_half_weights(),
                 candidate.vectorized, candidate.vector_tile);
             return std::chrono::duration<double, std::micro>(
                 std::chrono::steady_clock::now() - start).count();
@@ -148,24 +172,14 @@ GpuEncoderOutput encoder_gpu(
                 fp32(model, base + "norm1.weight"),
                 fp32(model, base + "norm1.bias"),
                 rows, embedding, 1.0e-6f);
-            operators.linear(
-                qkv, normalized,
-                fp16(model, base + "attn.qkv.weight"),
-                fp32(model, base + "attn.qkv.bias"),
-                rows, embedding, embedding * 3,
-                false, model.linear_block16(), true,
-                model.linear_vectorized(),
-                model.linear_vector_tile());
+            linear_model(model, operators, qkv, normalized,
+                base + "attn.qkv.weight", base + "attn.qkv.bias",
+                rows, embedding, embedding * 3);
             operators.attention_head64(
                 branch, qkv, tokens, heads, &scores, false, batches);
-            operators.linear(
-                normalized, branch,
-                fp16(model, base + "attn.proj.weight"),
-                fp32(model, base + "attn.proj.bias"),
-                rows, embedding, embedding,
-                false, model.linear_block16(), true,
-                model.linear_vectorized(),
-                model.linear_vector_tile());
+            linear_model(model, operators, normalized, branch,
+                base + "attn.proj.weight", base + "attn.proj.bias",
+                rows, embedding, embedding);
             operators.add_scaled(
                 next, current, normalized,
                 fp32(model, base + "ls1.gamma"),
@@ -178,22 +192,12 @@ GpuEncoderOutput encoder_gpu(
                 fp32(model, base + "norm2.weight"),
                 fp32(model, base + "norm2.bias"),
                 rows, embedding, 1.0e-6f);
-            operators.linear(
-                hidden, normalized,
-                fp16(model, base + "mlp.fc1.weight"),
-                fp32(model, base + "mlp.fc1.bias"),
-                rows, embedding, embedding * 4,
-                true, model.linear_block16(), true,
-                model.linear_vectorized(),
-                model.linear_vector_tile());
-            operators.linear(
-                branch, hidden,
-                fp16(model, base + "mlp.fc2.weight"),
-                fp32(model, base + "mlp.fc2.bias"),
-                rows, embedding * 4, embedding,
-                false, model.linear_block16(), true,
-                model.linear_vectorized(),
-                model.linear_vector_tile());
+            linear_model(model, operators, hidden, normalized,
+                base + "mlp.fc1.weight", base + "mlp.fc1.bias",
+                rows, embedding, embedding * 4, true);
+            linear_model(model, operators, branch, hidden,
+                base + "mlp.fc2.weight", base + "mlp.fc2.bias",
+                rows, embedding * 4, embedding);
             operators.add_scaled(
                 next, current, branch,
                 fp32(model, base + "ls2.gamma"),

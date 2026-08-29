@@ -8,6 +8,7 @@
 #include "operators.h"
 #include "vulkan.h"
 #include "inferbridge/native_harness_resource_lifetime.h"
+#include "inferbridge/native_harness_resource_cache.h"
 
 #include <array>
 #include <atomic>
@@ -69,15 +70,14 @@ ComPtr<ID3D12Device> matching_d3d12_device(std::uint64_t luid) {
 void validate_texture(ID3D12Device* device,std::uintptr_t handle,std::uint32_t width,std::uint32_t height,DXGI_FORMAT format,const char* op){ComPtr<ID3D12Resource> r;check_hresult(device->OpenSharedHandle(reinterpret_cast<HANDLE>(handle),IID_PPV_ARGS(&r)),op);const auto d=r->GetDesc();if(d.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||d.Width!=width||d.Height!=height||d.DepthOrArraySize!=1u||d.MipLevels!=1u||d.SampleDesc.Count!=1u||d.Format!=format)throw std::invalid_argument("Depth Pro shared texture descriptor mismatch");}
 class ExternalJobImpl final : public ExternalJob {
 public:
-    ExternalJobImpl(std::shared_ptr<ExternalGpu> owner, VulkanImage input,
-        VulkanImage output, VulkanSubmission submission,
+    ExternalJobImpl(std::shared_ptr<ExternalGpu> owner,
+        VulkanSubmission submission,
         inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime)
-        : owner_(std::move(owner)), input_(std::move(input)),
-          output_(std::move(output)), submission_(std::move(submission)),
+        : owner_(std::move(owner)), submission_(std::move(submission)),
           lifetime_(std::move(lifetime)) {}
     ~ExternalJobImpl() override {
         inferbridge::native_harness::wait_then_retire(
-            lifetime_, submission_, [this] { output_ = {}; input_ = {}; });
+            lifetime_, submission_, [] {});
     }
     ExternalJobState state() const override {
         if (cancelled_.load()) return ExternalJobState::cancelled;
@@ -89,7 +89,6 @@ public:
     void cancel() override { cancelled_.store(true); }
 private:
     std::shared_ptr<ExternalGpu> owner_;
-    VulkanImage input_, output_;
     mutable VulkanSubmission submission_;
     inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_;
     std::atomic<bool> cancelled_{false};
@@ -154,17 +153,40 @@ public:
             request.output_height != request.height) {
             throw std::invalid_argument("invalid Depth Pro GPU request");
         }
-        validate_texture(d3d12_.Get(),request.shared_texture_handle,request.width,request.height,DXGI_FORMAT_B8G8R8A8_UNORM,"OpenSharedHandle(Depth Pro input)");
-        validate_texture(d3d12_.Get(),request.output_texture_handle,request.output_width,request.output_height,DXGI_FORMAT_R32_FLOAT,"OpenSharedHandle(Depth Pro output)");
         try {
             auto lifetime_guard = lifetime_->acquire();
-            VulkanImage output=context_.import_d3d12_image(reinterpret_cast<void*>(request.output_texture_handle),request.output_width,request.output_height,VK_FORMAT_R32_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-            VulkanImage input = context_.import_d3d12_image(
-                reinterpret_cast<void*>(request.shared_texture_handle),
-                request.width, request.height,
-                VK_FORMAT_B8G8R8A8_UNORM,
-                VK_IMAGE_USAGE_SAMPLED_BIT |
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            const auto input_usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            const auto output_usage = VK_IMAGE_USAGE_STORAGE_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            VulkanImage& input = input_cache_.get_or_create({
+                inferbridge::native_harness::stable_resource_identity(
+                    request.shared_texture_handle,
+                    request.shared_texture_identity), request.width,
+                request.height, VK_FORMAT_B8G8R8A8_UNORM, input_usage}, [&] {
+                    validate_texture(d3d12_.Get(), request.shared_texture_handle,
+                        request.width, request.height,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        "OpenSharedHandle(Depth Pro input)");
+                    return context_.import_d3d12_image(
+                        reinterpret_cast<void*>(request.shared_texture_handle),
+                        request.width, request.height,
+                        VK_FORMAT_B8G8R8A8_UNORM, input_usage);
+                });
+            VulkanImage& output = output_cache_.get_or_create({
+                inferbridge::native_harness::stable_resource_identity(
+                    request.output_texture_handle,
+                    request.output_texture_identity), request.output_width,
+                request.output_height, VK_FORMAT_R32_SFLOAT, output_usage}, [&] {
+                    validate_texture(d3d12_.Get(), request.output_texture_handle,
+                        request.output_width, request.output_height,
+                        DXGI_FORMAT_R32_FLOAT,
+                        "OpenSharedHandle(Depth Pro output)");
+                    return context_.import_d3d12_image(
+                        reinterpret_cast<void*>(request.output_texture_handle),
+                        request.output_width, request.output_height,
+                        VK_FORMAT_R32_SFLOAT, output_usage);
+                });
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(request.wait_fence_handle),
                 request.wait_fence_value);
@@ -216,8 +238,7 @@ public:
                 throw;
             }
             return std::make_shared<ExternalJobImpl>(
-                shared_from_this(), std::move(input), std::move(output),
-                std::move(submission), lifetime_);
+                shared_from_this(), std::move(submission), lifetime_);
         } catch (...) { throw; }
 #endif
     }
@@ -239,6 +260,10 @@ private:
     float forced_fov_degrees_ = 0.0f;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
+    inferbridge::native_harness::StableResourceCache<VulkanImage>
+        input_cache_;
+    inferbridge::native_harness::StableResourceCache<VulkanImage>
+        output_cache_;
     inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_ =
         inferbridge::native_harness::make_resource_lifetime_domain();
 #endif
