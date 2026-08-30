@@ -23,7 +23,9 @@ bool is_large_weight(std::string_view name) {
 
 }  // namespace
 
-GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
+GpuModel::GpuModel(
+    const ModelFile& model, VulkanContext& context,
+    bool load_fov_weights) {
     const auto precision = inferbridge::native::require_supported_precision(
         inferbridge::native::requested_precision(),
         {context.supports_float16(), context.supports_packed_int8_dot()},
@@ -32,7 +34,24 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
     uses_half_weights_ = precision == inferbridge::native::Precision::fp16;
     uses_int8_weights_ = precision == inferbridge::native::Precision::int8;
     tensors_.reserve(model.tensor_count());
+    std::uint64_t uploaded_bytes = 0u;
+    std::size_t uploaded_buffers = 0u;
+    const auto upload = [&](std::string_view name, VulkanBuffer& buffer,
+                            const void* data, std::size_t bytes) {
+        try {
+            context.upload(buffer, data, bytes);
+            uploaded_bytes += bytes;
+            ++uploaded_buffers;
+        } catch (const std::exception& error) {
+            throw std::runtime_error(
+                "failed to upload Depth Pro tensor " + std::string(name) +
+                " (" + std::to_string(bytes) + " bytes after " +
+                std::to_string(uploaded_bytes) + " successful bytes): " +
+                std::to_string(uploaded_buffers) + " buffers: " + error.what());
+        }
+    };
     for (std::string_view name : model.tensor_names()) {
+        if (!load_fov_weights && name.rfind("fov.", 0) == 0) continue;
         const TensorView& source = model.tensor(name);
         if (source.elements >
             std::numeric_limits<std::size_t>::max() / sizeof(float)) {
@@ -62,9 +81,9 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
                 quantized.packed.size() * sizeof(std::uint32_t));
             destination.int8_scales = context.create_device_buffer(
                 quantized.scales.size() * sizeof(float));
-            context.upload(destination.int8_buffer, quantized.packed.data(),
+            upload(name, destination.int8_buffer, quantized.packed.data(),
                 quantized.packed.size() * sizeof(std::uint32_t));
-            context.upload(destination.int8_scales, quantized.scales.data(),
+            upload(name, destination.int8_scales, quantized.scales.data(),
                 quantized.scales.size() * sizeof(float));
         } else if (is_large_weight(name) && uses_half_weights_) {
             const std::size_t packed_bytes =
@@ -79,8 +98,8 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
                 source_bytes, packed.data());
             destination.half_buffer =
                 context.create_device_buffer(packed_bytes);
-            context.upload(
-                destination.half_buffer, packed.data(), packed.size());
+            upload(name, destination.half_buffer,
+                packed.data(), packed.size());
         } else {
             std::vector<float> decoded(
                 static_cast<std::size_t>(source.elements));
@@ -90,8 +109,7 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
             destination.buffer =
                 context.create_device_buffer(
                     decoded.size() * sizeof(float));
-            context.upload(
-                destination.buffer, decoded.data(),
+            upload(name, destination.buffer, decoded.data(),
                 decoded.size() * sizeof(float));
         }
         if (!tensors_.emplace(name, std::move(destination)).second) {

@@ -100,7 +100,8 @@ class ExternalGpuImpl final : public ExternalGpu {
 public:
     ExternalGpuImpl(
         const std::string& path, float forced_fov, std::uint32_t index)
-        : model_(path), context_(index), gpu_model_(model_, context_),
+        : model_(path), context_(index), gpu_model_(
+              model_, context_, !(forced_fov > 0.0f && forced_fov < 180.0f)),
           operators_(context_), io_(context_),
           zero_(context_.create_device_buffer(1024u * sizeof(float))),
           forced_fov_degrees_(forced_fov)

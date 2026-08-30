@@ -22,7 +22,9 @@ struct GpuTensor {
 
 class GpuModel {
 public:
-    GpuModel(const ModelFile& model, VulkanContext& context);
+    GpuModel(
+        const ModelFile& model, VulkanContext& context,
+        bool load_fov_weights = true);
 
     const GpuTensor& tensor(std::string_view name) const;
     bool uses_half_weights() const { return uses_half_weights_; }
