@@ -14,6 +14,15 @@ endif()
 
 option(DEPTH_PRO_WITH_VULKAN
     "Build the dependency-free Vulkan executor" ON)
+option(DEPTH_PRO_WITH_METAL
+    "Build the native Metal executor" ${APPLE})
+
+if(DEPTH_PRO_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "DEPTH_PRO_WITH_METAL requires Apple platforms")
+    endif()
+    enable_language(OBJCXX)
+endif()
 
 if(DEPTH_PRO_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -95,6 +104,17 @@ target_include_directories(depth_pro_core PUBLIC src)
 add_library(depth_pro_model SHARED
     src/depth_pro.cpp
     src/inferbridge_harness.cpp)
+if(DEPTH_PRO_WITH_METAL)
+    target_sources(depth_pro_model PRIVATE src/metal_executor.mm)
+    target_link_libraries(depth_pro_model PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
+    target_compile_definitions(
+        depth_pro_model PRIVATE DEPTH_PRO_WITH_METAL=1)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+endif()
 if(DEPTH_PRO_WITH_VULKAN)
     target_sources(depth_pro_model PRIVATE
         src/vulkan.cpp
@@ -136,6 +156,10 @@ add_executable(
     depth_pro_full_graph_probe tools/full_graph_probe.cpp)
 target_link_libraries(
     depth_pro_full_graph_probe PRIVATE depth_pro_core)
+
+add_executable(depth_pro_inference_dump tools/inference_dump.cpp)
+target_link_libraries(depth_pro_inference_dump PRIVATE depth_pro_model)
+target_include_directories(depth_pro_inference_dump PRIVATE include)
 
 include(CTest)
 if(BUILD_TESTING)

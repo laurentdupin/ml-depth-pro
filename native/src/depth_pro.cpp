@@ -2,6 +2,9 @@
 
 #include "graph_cpu.h"
 #include "model.h"
+#if defined(DEPTH_PRO_WITH_METAL)
+#include "metal_executor.h"
+#endif
 #if defined(DEPTH_PRO_WITH_VULKAN)
 #include "gpu_model.h"
 #include "graph_gpu.h"
@@ -17,6 +20,9 @@
 
 struct depth_pro_context {
     std::unique_ptr<depth_pro_native::ModelFile> model;
+#if defined(DEPTH_PRO_WITH_METAL)
+    std::unique_ptr<depth_pro_native::MetalExecutor> metal;
+#endif
 #if defined(DEPTH_PRO_WITH_VULKAN)
     std::unique_ptr<depth_pro_native::VulkanContext> vulkan;
     std::unique_ptr<depth_pro_native::GpuModel> gpu_model;
@@ -64,7 +70,7 @@ uint32_t DEPTH_PRO_CALL depth_pro_abi_version(void) {
 }
 
 const char* DEPTH_PRO_CALL depth_pro_version_string(void) {
-    return "0.4.0-d3d12-vulkan-gpu-resident";
+    return "0.5.0-d3d12-vulkan-metal-gpu-resident";
 }
 
 depth_pro_status DEPTH_PRO_CALL depth_pro_get_transfer_counters(
@@ -102,7 +108,17 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_create_vulkan(
             DEPTH_PRO_STATUS_INVALID_ARGUMENT,
             "model path is empty");
     }
-#if !defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_METAL)
+    (void)device_index;
+    return protect([&] {
+        auto result = std::make_unique<depth_pro_context>();
+        result->model =
+            std::make_unique<depth_pro_native::ModelFile>(path);
+        result->metal =
+            std::make_unique<depth_pro_native::MetalExecutor>(*result->model);
+        *context = result.release();
+    });
+#elif !defined(DEPTH_PRO_WITH_VULKAN)
     (void)device_index;
     return fail(
         DEPTH_PRO_STATUS_INTERNAL_ERROR,
@@ -174,6 +190,17 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_rgb_f32(
             "invalid Depth Pro tensor inference input");
     }
     return protect([&] {
+#if defined(DEPTH_PRO_WITH_METAL)
+        if (context->metal) {
+            depth_pro_native::InferenceOutput result =
+                context->metal->infer(
+                    rgb, static_cast<std::uint32_t>(width),
+                    static_cast<std::uint32_t>(height), 0.0f);
+            std::copy(result.depth.begin(), result.depth.end(), depth);
+            if (focal) *focal = result.focal_length_pixels;
+            return;
+        }
+#endif
 #if defined(DEPTH_PRO_WITH_VULKAN)
         if (context->vulkan) {
             depth_pro_native::GpuInferenceOutput result =
@@ -258,6 +285,17 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_bgra8_f32(
             if (focal) {
                 *focal = result.focal_length_pixels;
             }
+            return;
+        }
+#endif
+#if defined(DEPTH_PRO_WITH_METAL)
+        if (context->metal) {
+            depth_pro_native::InferenceOutput result =
+                context->metal->infer(
+                    rgb.data(), static_cast<std::uint32_t>(width),
+                    static_cast<std::uint32_t>(height), forced_fov_degrees);
+            std::copy(result.depth.begin(), result.depth.end(), depth);
+            if (focal) *focal = result.focal_length_pixels;
             return;
         }
 #endif
