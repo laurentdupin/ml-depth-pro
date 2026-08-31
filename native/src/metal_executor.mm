@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -497,6 +498,10 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize Depth Pro Metal");
+        inferbridge::native_harness::metal::label_queue(queue_, "Depth Pro");
+        tensor_pool_ = std::make_shared<
+            inferbridge::native_harness::metal::AuxiliaryTensorPool>(
+                device_, "Depth Pro");
         create_texture_pipelines();
     }
 
@@ -632,33 +637,41 @@ public:
             prepared.output_texture.height != request.output_height ||
             prepared.output_texture.pixelFormat != MTLPixelFormatR32Float)
             throw std::invalid_argument("Depth Pro Metal texture descriptor mismatch");
-        constexpr NSUInteger x0_count = 3u * 1536u * 1536u;
-        constexpr NSUInteger x1_count = 3u * 768u * 768u;
-        constexpr NSUInteger x2_count = 3u * 384u * 384u;
-        constexpr NSUInteger patch_count = 35u * x2_count;
         std::lock_guard<std::mutex> guard(mutex_);
         @autoreleasepool {
-            id<MTLBuffer> x0 = [device_ newBufferWithLength:x0_count*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> x1 = [device_ newBufferWithLength:x1_count*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> x2 = [device_ newBufferWithLength:x2_count*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> patches = [device_ newBufferWithLength:patch_count*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> inverse = [device_ newBufferWithLength:
-                1536u*1536u*sizeof(float) options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> fov = [device_ newBufferWithLength:sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> forced = [device_ newBufferWithBytes:&forced_fov_degrees
-                length:sizeof(float) options:MTLResourceStorageModeShared];
-            if (!x0 || !x1 || !x2 || !patches || !inverse || !fov || !forced)
-                throw std::bad_alloc();
+            auto tensors = tensor_pool_->acquire({
+                {{1, 3, 1536, 1536}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "Full Resolution Input"},
+                {{1, 3, 768, 768}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "Half Resolution Input"},
+                {{1, 3, 384, 384}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "Network Input"},
+                {{35, 3, 384, 384}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "Patch Input"},
+                {{1, 1, 1536, 1536}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "Inverse Depth Output"},
+                {{1}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModePrivate, "FOV Output"},
+                {{1}, MPSDataTypeFloat32, sizeof(float),
+                    MTLResourceStorageModeShared, "Forced FOV Input"}});
+            id<MTLBuffer> x0 = tensors->buffer(0);
+            id<MTLBuffer> x1 = tensors->buffer(1);
+            id<MTLBuffer> x2 = tensors->buffer(2);
+            id<MTLBuffer> patches = tensors->buffer(3);
+            id<MTLBuffer> inverse = tensors->buffer(4);
+            id<MTLBuffer> fov = tensors->buffer(5);
+            id<MTLBuffer> forced = tensors->buffer(6);
+            std::memcpy(forced.contents, &forced_fov_degrees, sizeof(float));
+            prepared.retained_resources.push_back(tensors);
             id<MTLCommandBuffer> preprocess = [queue_ commandBuffer];
+            inferbridge::native_harness::metal::label_command(
+                preprocess, "Depth Pro", "Preprocess and Pack Patches");
             if (prepared.wait_event)
                 [preprocess encodeWaitForEvent:prepared.wait_event
                     value:request.wait_fence_value];
             id<MTLComputeCommandEncoder> encoder = [preprocess computeCommandEncoder];
+            inferbridge::native_harness::metal::label_encoder(
+                encoder, "Depth Pro", "Preprocess and Pack Patches");
             struct ResizeParameters { uint32_t sw, sh, dw, dh; };
             ResizeParameters p0{request.width, request.height,1536u,1536u};
             [encoder setComputePipelineState:texture_resize_pipeline_];
@@ -684,22 +697,12 @@ public:
             const Plan& plan = get_plan(use_forced_fov);
             NSMutableArray<MPSGraphTensorData*>* inputs =
                 [NSMutableArray arrayWithObjects:
-                    [[MPSGraphTensorData alloc] initWithMTLBuffer:patches
-                        shape:shape({35,3,384,384})
-                        dataType:MPSDataTypeFloat32],
-                    [[MPSGraphTensorData alloc] initWithMTLBuffer:x2
-                        shape:shape({1,3,384,384})
-                        dataType:MPSDataTypeFloat32], nil];
+                    tensors->data(3), tensors->data(2), nil];
             if (use_forced_fov) {
-                [inputs addObject:[[MPSGraphTensorData alloc]
-                    initWithMTLBuffer:forced shape:shape({1})
-                    dataType:MPSDataTypeFloat32]];
+                [inputs addObject:tensors->data(6)];
             }
             NSArray<MPSGraphTensorData*>* outputs = @[
-                [[MPSGraphTensorData alloc] initWithMTLBuffer:inverse
-                    shape:shape({1,1,1536,1536}) dataType:MPSDataTypeFloat32],
-                [[MPSGraphTensorData alloc] initWithMTLBuffer:fov
-                    shape:shape({1}) dataType:MPSDataTypeFloat32]];
+                tensors->data(4), tensors->data(5)];
             MPSGraphExecutableExecutionDescriptor* execution =
                 [MPSGraphExecutableExecutionDescriptor new];
             execution.waitUntilCompleted = NO;
@@ -708,7 +711,11 @@ public:
             if (results.count != 2u)
                 throw std::runtime_error("Depth Pro Metal output binding failed");
             id<MTLCommandBuffer> completion = [queue_ commandBuffer];
+            inferbridge::native_harness::metal::label_command(
+                completion, "Depth Pro", "Present Depth");
             encoder = [completion computeCommandEncoder];
+            inferbridge::native_harness::metal::label_encoder(
+                encoder, "Depth Pro", "Present Depth");
             struct FinalParameters { uint32_t width,height; } final{request.width,request.height};
             [encoder setComputePipelineState:final_pipeline_];
             [encoder setBuffer:inverse offset:0 atIndex:0];
@@ -904,6 +911,8 @@ kernel void final_depth(device const float*inv [[buffer(0)]],device const float*
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
     MPSGraphDevice* graph_device_ = nil;
+    std::shared_ptr<inferbridge::native_harness::metal::AuxiliaryTensorPool>
+        tensor_pool_;
     std::unordered_map<PlanKey, Plan, PlanHash> plans_;
     std::mutex mutex_;
     id<MTLComputePipelineState> texture_resize_pipeline_=nil;
