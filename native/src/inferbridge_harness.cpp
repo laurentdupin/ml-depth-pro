@@ -3,8 +3,16 @@
 
 #include "depth_pro_native.h"
 #include <inferbridge/native_harness_precision.h>
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_VULKAN) || defined(DEPTH_PRO_WITH_METAL)
 #include "external_gpu.h"
+#endif
+#if defined(DEPTH_PRO_WITH_METAL)
+#include "depth_pro_internal.h"
+#endif
+
+#if (defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(DEPTH_PRO_WITH_METAL) && defined(__APPLE__))
+#define DEPTH_PRO_WITH_EXTERNAL_GPU 1
 #endif
 
 #include <algorithm>
@@ -45,7 +53,7 @@ struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     depth_pro_context* context = nullptr;
     std::string model_path;
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
     std::shared_ptr<depth_pro_native::ExternalGpu> external_gpu;
     std::shared_ptr<DepthProGpuWorker> gpu_worker;
     std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
@@ -57,7 +65,7 @@ struct ibrh_model {
 
 struct ibrh_job {
     std::atomic<uint32_t> references{1u};
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
     mutable std::mutex gpu_mutex;
     std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
     std::shared_ptr<DepthProGpuAdmission> gpu_admission;
@@ -80,7 +88,7 @@ struct ibrh_job {
     uint32_t height = 0u;
     std::vector<float> depth;
     ~ibrh_job() {
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
         gpu_job.reset(); gpu_admission.reset();
 #endif
     }
@@ -90,7 +98,7 @@ namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.depth-pro.native";
-constexpr char kHarnessVersion[] = "1.2.0";
+constexpr char kHarnessVersion[] = "1.3.0";
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -238,7 +246,7 @@ void release_job(ibrh_job* job) {
 
 } // namespace
 
-#if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
 struct DepthProGpuAdmission {
     explicit DepthProGpuAdmission(
         std::shared_ptr<std::atomic<uint32_t>> value)
@@ -402,6 +410,19 @@ ibrh_result IBRH_CALL query_capabilities(
     } catch (...) {
     }
 #endif
+#if defined(DEPTH_PRO_WITH_METAL) && defined(__APPLE__)
+    capabilities->flags |=
+        IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION |
+        IBRH_CAP_GPU_RESOURCES | IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
+        IBRH_CAP_GPU_RESIDENT_OUTPUT;
+    capabilities->input_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->output_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->synchronization_mask =
+        1ull << IBRH_SYNC_METAL_SHARED_EVENT;
+    capabilities->maximum_in_flight_jobs = 3u;
+#endif
     capabilities->harness_id = {kHarnessId, sizeof(kHarnessId) - 1u};
     capabilities->harness_version = {
         kHarnessVersion, sizeof(kHarnessVersion) - 1u};
@@ -525,6 +546,21 @@ ibrh_result IBRH_CALL model_load(
             delete model;
             return fail(runtime, status_result(status), message);
         }
+#if defined(DEPTH_PRO_WITH_METAL) && defined(__APPLE__)
+        if (!runtime->force_host_transfers) {
+            try {
+                model->external_gpu = depth_pro_native::create_metal_external_gpu(
+                    model->context, model->forced_fov_degrees);
+                model->gpu_worker = std::make_shared<DepthProGpuWorker>(
+                    model->external_gpu);
+            } catch (const std::exception& error) {
+                depth_pro_destroy(model->context);
+                delete model;
+                return fail(runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                    error.what());
+            }
+        }
+#endif
     }
     *output = model;
     return IBRH_OK;
@@ -532,10 +568,8 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-#if defined(DEPTH_PRO_WITH_VULKAN)
-#if defined(_WIN32)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
     if (model->gpu_worker) model->gpu_worker->stop();
-#endif
     model->gpu_worker.reset();
     model->external_gpu.reset();
 #endif
@@ -551,6 +585,9 @@ ibrh_result IBRH_CALL submit(ibrh_model*model,size_t n,const ibrh_submit_request
 #if defined(DEPTH_PRO_WITH_VULKAN) && defined(_WIN32)
 if(i.domain==IBRH_RESOURCE_DOMAIN_D3D12){if(fov!=model->forced_fov_degrees||o.domain!=IBRH_RESOURCE_DOMAIN_D3D12||i.pixel_format!=IBRH_PIXEL_BGRA8||i.native_handle_type!=IBRH_NATIVE_HANDLE_WIN32_SHARED||o.native_handle_type!=IBRH_NATIVE_HANDLE_WIN32_SHARED||s.synchronization.kind!=IBRH_SYNC_D3D12_FENCE||s.synchronization.operation!=IBRH_SYNC_WAIT||t.synchronization.kind!=IBRH_SYNC_D3D12_FENCE||t.synchronization.operation!=IBRH_SYNC_SIGNAL)return IBRH_ERROR_UNSUPPORTED_CAPABILITY;uint32_t admitted=model->gpu_admissions->load();while(admitted<3&&!model->gpu_admissions->compare_exchange_weak(admitted,admitted+1)){}if(admitted>=3)return IBRH_ERROR_INVALID_STATE;auto*j=new(std::nothrow)ibrh_job();if(!j){model->gpu_admissions->fetch_sub(1);return IBRH_ERROR_INTERNAL;}try{j->gpu_admission=std::make_shared<DepthProGpuAdmission>(model->gpu_admissions);}catch(...){model->gpu_admissions->fetch_sub(1);delete j;return IBRH_ERROR_INTERNAL;}j->input_texture_handle=i.native_handle;j->input_texture_identity=i.auxiliary_handle;j->input_fence_handle=s.synchronization.native_handle;j->input_fence_value=s.synchronization.value;j->output_texture_handle=o.native_handle;j->output_texture_identity=o.auxiliary_handle;j->output_fence_handle=t.synchronization.native_handle;j->output_fence_value=t.synchronization.value;j->source_frame_id=r->source_frame_id;j->timestamp_ns=r->timestamp_ns;j->width=i.width;j->height=i.height;try{std::lock_guard<std::mutex>l(model->submit_mutex);if(!model->external_gpu){depth_pro_destroy(model->context);model->context=nullptr;model->external_gpu=depth_pro_native::create_external_gpu(model->model_path,model->forced_fov_degrees,model->runtime->vulkan_device_index);model->gpu_worker=std::make_shared<DepthProGpuWorker>(model->external_gpu);}j->gpu_worker=model->gpu_worker;model->gpu_worker->enqueue(j);}catch(const std::exception&e){delete j;return fail(model->runtime,IBRH_ERROR_UNSUPPORTED_CAPABILITY,e.what());}*out=j;return IBRH_OK;}
 #endif
+#if defined(DEPTH_PRO_WITH_METAL) && defined(__APPLE__)
+if(i.domain==IBRH_RESOURCE_DOMAIN_METAL){const auto&wait=s.synchronization;const auto&signal=t.synchronization;const bool no_wait=wait.kind==IBRH_SYNC_NONE;const bool event_wait=wait.kind==IBRH_SYNC_METAL_SHARED_EVENT&&wait.operation==IBRH_SYNC_WAIT&&wait.native_handle_type==IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT&&wait.native_handle!=0u;if(fov!=model->forced_fov_degrees||!model->external_gpu||o.domain!=IBRH_RESOURCE_DOMAIN_METAL||i.pixel_format!=IBRH_PIXEL_BGRA8||i.native_handle_type!=IBRH_NATIVE_HANDLE_METAL_TEXTURE||!i.native_handle||o.native_handle_type!=IBRH_NATIVE_HANDLE_METAL_TEXTURE||!o.native_handle||(!no_wait&&!event_wait)||signal.kind!=IBRH_SYNC_METAL_SHARED_EVENT||signal.operation!=IBRH_SYNC_SIGNAL||signal.native_handle_type!=IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT||!signal.native_handle||!signal.value)return IBRH_ERROR_UNSUPPORTED_CAPABILITY;uint32_t admitted=model->gpu_admissions->load();while(admitted<3&&!model->gpu_admissions->compare_exchange_weak(admitted,admitted+1)){}if(admitted>=3)return IBRH_ERROR_INVALID_STATE;auto*j=new(std::nothrow)ibrh_job();if(!j){model->gpu_admissions->fetch_sub(1);return IBRH_ERROR_INTERNAL;}try{j->gpu_admission=std::make_shared<DepthProGpuAdmission>(model->gpu_admissions);}catch(...){model->gpu_admissions->fetch_sub(1);delete j;return IBRH_ERROR_INTERNAL;}j->input_texture_handle=i.native_handle;j->input_texture_identity=i.auxiliary_handle;j->input_fence_handle=event_wait?wait.native_handle:0u;j->input_fence_value=event_wait?wait.value:0u;j->output_texture_handle=o.native_handle;j->output_texture_identity=o.auxiliary_handle;j->output_fence_handle=signal.native_handle;j->output_fence_value=signal.value;j->source_frame_id=r->source_frame_id;j->timestamp_ns=r->timestamp_ns;j->width=i.width;j->height=i.height;try{j->gpu_worker=model->gpu_worker;model->gpu_worker->enqueue(j);}catch(const std::exception&e){delete j;return fail(model->runtime,IBRH_ERROR_UNSUPPORTED_CAPABILITY,e.what());}*out=j;return IBRH_OK;}
+#endif
 if(i.domain!=IBRH_RESOURCE_DOMAIN_HOST||o.domain!=IBRH_RESOURCE_DOMAIN_HOST||i.pixel_format!=IBRH_PIXEL_BGRA8||i.native_handle_type!=IBRH_NATIVE_HANDLE_HOST_POINTER||o.native_handle_type!=IBRH_NATIVE_HANDLE_HOST_POINTER||s.synchronization.kind!=IBRH_SYNC_NONE||t.synchronization.kind!=IBRH_SYNC_NONE)return IBRH_ERROR_UNSUPPORTED_CAPABILITY;const auto*bgra=reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(i.native_handle))+i.byte_offset;auto*depth=reinterpret_cast<float*>(static_cast<uintptr_t>(o.native_handle)+o.byte_offset);float focal=0;depth_pro_status q;{std::lock_guard<std::mutex>l(model->submit_mutex);q=depth_pro_infer_bgra8_f32(model->context,bgra,i.row_stride_bytes,i.width,i.height,fov,depth,static_cast<size_t>(i.width)*i.height,&focal);}if(q!=DEPTH_PRO_STATUS_OK)return fail(model->runtime,status_result(q),depth_pro_last_error());auto*j=new(std::nothrow)ibrh_job();if(!j)return IBRH_ERROR_INTERNAL;j->source_frame_id=r->source_frame_id;j->timestamp_ns=r->timestamp_ns;j->width=i.width;j->height=i.height;*out=j;return IBRH_OK;}
 ibrh_result IBRH_CALL job_poll(
     const ibrh_job* job, size_t status_size, ibrh_job_status* status) {
@@ -559,7 +596,7 @@ ibrh_result IBRH_CALL job_poll(
     if (status_size < sizeof(*status)) return IBRH_ERROR_STRUCT_TOO_SMALL;
     *status = {};
     status->struct_size = sizeof(*status);
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
     if (job->gpu_admission) {
         std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
         {
@@ -591,13 +628,11 @@ ibrh_result IBRH_CALL job_poll(
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
-#if defined(DEPTH_PRO_WITH_VULKAN)
+#if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
     job->cancel_requested.store(true);
-#if defined(_WIN32)
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job))
         return IBRH_OK;
-#endif
     std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
     {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);

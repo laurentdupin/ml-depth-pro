@@ -1,4 +1,5 @@
 #include "metal_executor.h"
+#include "inferbridge/native_harness_metal_texture.h"
 #include "inferbridge/native_harness_precision.h"
 
 #import <Foundation/Foundation.h>
@@ -465,6 +466,21 @@ struct Plan {
     bool forced = false;
 };
 
+class MetalExternalJob final : public ExternalJob {
+public:
+    explicit MetalExternalJob(
+        std::shared_ptr<inferbridge::native_harness::metal::Submission> value)
+        : submission_(std::move(value)) {}
+    ExternalJobState state() const override {
+        if (submission_->cancelled()) return ExternalJobState::cancelled;
+        return submission_->complete() ? ExternalJobState::complete :
+            ExternalJobState::running;
+    }
+    void cancel() override { submission_->cancel(); }
+private:
+    std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;
+};
+
 }  // namespace
 
 class MetalExecutor::Impl {
@@ -481,6 +497,7 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize Depth Pro Metal");
+        create_texture_pipelines();
     }
 
     InferenceOutput infer(
@@ -580,7 +597,212 @@ public:
         }
     }
 
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request, float forced_fov_degrees) {
+        if (!request.shared_texture_handle || !request.output_texture_handle ||
+            !request.signal_fence_handle || !request.signal_fence_value ||
+            !request.width || !request.height ||
+            request.output_width != request.width ||
+            request.output_height != request.height)
+            throw std::invalid_argument("invalid Depth Pro Metal texture request");
+        inferbridge::native_harness::metal::Prepared prepared;
+        prepared.input_texture = (__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.shared_texture_handle));
+        prepared.output_texture = (__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.output_texture_handle));
+        prepared.wait_event = request.wait_fence_handle ?
+            (__bridge id<MTLSharedEvent>)(reinterpret_cast<void*>(
+                request.wait_fence_handle)) : nil;
+        prepared.signal_event = (__bridge id<MTLSharedEvent>)(
+            reinterpret_cast<void*>(request.signal_fence_handle));
+        prepared.signal_value = request.signal_fence_value;
+        if (prepared.input_texture.device.registryID != device_.registryID ||
+            prepared.output_texture.device.registryID != device_.registryID ||
+            prepared.input_texture.textureType != MTLTextureType2D ||
+            prepared.input_texture.width != request.width ||
+            prepared.input_texture.height != request.height ||
+            prepared.input_texture.pixelFormat != MTLPixelFormatBGRA8Unorm ||
+            prepared.output_texture.textureType != MTLTextureType2D ||
+            prepared.output_texture.width != request.output_width ||
+            prepared.output_texture.height != request.output_height ||
+            prepared.output_texture.pixelFormat != MTLPixelFormatR32Float)
+            throw std::invalid_argument("Depth Pro Metal texture descriptor mismatch");
+        constexpr NSUInteger x0_count = 3u * 1536u * 1536u;
+        constexpr NSUInteger x1_count = 3u * 768u * 768u;
+        constexpr NSUInteger x2_count = 3u * 384u * 384u;
+        constexpr NSUInteger patch_count = 35u * x2_count;
+        std::lock_guard<std::mutex> guard(mutex_);
+        @autoreleasepool {
+            id<MTLBuffer> x0 = [device_ newBufferWithLength:x0_count*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> x1 = [device_ newBufferWithLength:x1_count*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> x2 = [device_ newBufferWithLength:x2_count*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> patches = [device_ newBufferWithLength:patch_count*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> inverse = [device_ newBufferWithLength:
+                1536u*1536u*sizeof(float) options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> fov = [device_ newBufferWithLength:sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> forced = [device_ newBufferWithBytes:&forced_fov_degrees
+                length:sizeof(float) options:MTLResourceStorageModeShared];
+            if (!x0 || !x1 || !x2 || !patches || !inverse || !fov || !forced)
+                throw std::bad_alloc();
+            id<MTLCommandBuffer> preprocess = [queue_ commandBuffer];
+            if (prepared.wait_event)
+                [preprocess encodeWaitForEvent:prepared.wait_event
+                    value:request.wait_fence_value];
+            id<MTLComputeCommandEncoder> encoder = [preprocess computeCommandEncoder];
+            struct ResizeParameters { uint32_t sw, sh, dw, dh; };
+            ResizeParameters p0{request.width, request.height,1536u,1536u};
+            [encoder setComputePipelineState:texture_resize_pipeline_];
+            [encoder setTexture:prepared.input_texture atIndex:0];
+            [encoder setBuffer:x0 offset:0 atIndex:0];
+            [encoder setBytes:&p0 length:sizeof(p0) atIndex:1];
+            dispatch(encoder, texture_resize_pipeline_,1536,1536,3);
+            [encoder setComputePipelineState:buffer_resize_pipeline_];
+            ResizeParameters p1{1536,1536,768,768};
+            [encoder setBuffer:x0 offset:0 atIndex:0]; [encoder setBuffer:x1 offset:0 atIndex:1];
+            [encoder setBytes:&p1 length:sizeof(p1) atIndex:2];
+            dispatch(encoder, buffer_resize_pipeline_,768,768,3);
+            ResizeParameters p2{1536,1536,384,384};
+            [encoder setBuffer:x0 offset:0 atIndex:0]; [encoder setBuffer:x2 offset:0 atIndex:1];
+            [encoder setBytes:&p2 length:sizeof(p2) atIndex:2];
+            dispatch(encoder, buffer_resize_pipeline_,384,384,3);
+            [encoder setComputePipelineState:pack_pipeline_];
+            [encoder setBuffer:x0 offset:0 atIndex:0]; [encoder setBuffer:x1 offset:0 atIndex:1];
+            [encoder setBuffer:x2 offset:0 atIndex:2]; [encoder setBuffer:patches offset:0 atIndex:3];
+            dispatch(encoder, pack_pipeline_,384,384,35*3);
+            [encoder endEncoding]; [preprocess commit];
+            const bool use_forced_fov = forced_fov_degrees > 0.0f;
+            const Plan& plan = get_plan(use_forced_fov);
+            NSMutableArray<MPSGraphTensorData*>* inputs =
+                [NSMutableArray arrayWithObjects:
+                    [[MPSGraphTensorData alloc] initWithMTLBuffer:patches
+                        shape:shape({35,3,384,384})
+                        dataType:MPSDataTypeFloat32],
+                    [[MPSGraphTensorData alloc] initWithMTLBuffer:x2
+                        shape:shape({1,3,384,384})
+                        dataType:MPSDataTypeFloat32], nil];
+            if (use_forced_fov) {
+                [inputs addObject:[[MPSGraphTensorData alloc]
+                    initWithMTLBuffer:forced shape:shape({1})
+                    dataType:MPSDataTypeFloat32]];
+            }
+            NSArray<MPSGraphTensorData*>* outputs = @[
+                [[MPSGraphTensorData alloc] initWithMTLBuffer:inverse
+                    shape:shape({1,1,1536,1536}) dataType:MPSDataTypeFloat32],
+                [[MPSGraphTensorData alloc] initWithMTLBuffer:fov
+                    shape:shape({1}) dataType:MPSDataTypeFloat32]];
+            MPSGraphExecutableExecutionDescriptor* execution =
+                [MPSGraphExecutableExecutionDescriptor new];
+            execution.waitUntilCompleted = NO;
+            NSArray* results = [plan.executable runAsyncWithMTLCommandQueue:queue_
+                inputsArray:inputs resultsArray:outputs executionDescriptor:execution];
+            if (results.count != 2u)
+                throw std::runtime_error("Depth Pro Metal output binding failed");
+            id<MTLCommandBuffer> completion = [queue_ commandBuffer];
+            encoder = [completion computeCommandEncoder];
+            struct FinalParameters { uint32_t width,height; } final{request.width,request.height};
+            [encoder setComputePipelineState:final_pipeline_];
+            [encoder setBuffer:inverse offset:0 atIndex:0];
+            [encoder setBuffer:fov offset:0 atIndex:1];
+            [encoder setTexture:prepared.output_texture atIndex:0];
+            [encoder setBytes:&final length:sizeof(final) atIndex:2];
+            dispatch(encoder, final_pipeline_,request.width,request.height,1);
+            [encoder endEncoding];
+            [completion encodeSignalEvent:prepared.signal_event value:prepared.signal_value];
+            [completion commit];
+            return std::make_shared<MetalExternalJob>(
+                std::make_shared<inferbridge::native_harness::metal::Submission>(
+                    prepared, completion));
+        }
+    }
+
 private:
+    static void dispatch(id<MTLComputeCommandEncoder> encoder,
+        id<MTLComputePipelineState> pipeline, NSUInteger width,
+        NSUInteger height, NSUInteger depth) {
+        const NSUInteger x = pipeline.threadExecutionWidth;
+        const NSUInteger y = std::max<NSUInteger>(1,
+            pipeline.maxTotalThreadsPerThreadgroup / x);
+        [encoder dispatchThreads:MTLSizeMake(width,height,depth)
+            threadsPerThreadgroup:MTLSizeMake(x,y,1)];
+    }
+
+    void create_texture_pipelines() {
+        static constexpr char source_text[] = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+struct ResizeParameters { uint sw,sh,dw,dh; };
+float bilinear(device const float* src,uint c,float sx,float sy,uint w,uint h){
+ sx=clamp(sx,0.0f,float(w-1)); sy=clamp(sy,0.0f,float(h-1));
+ uint x0=uint(sx),y0=uint(sy),x1=min(x0+1,w-1),y1=min(y0+1,h-1);
+ float fx=sx-float(x0),fy=sy-float(y0); uint plane=w*h,base=c*plane;
+ return mix(mix(src[base+y0*w+x0],src[base+y0*w+x1],fx),
+            mix(src[base+y1*w+x0],src[base+y1*w+x1],fx),fy);
+}
+kernel void texture_resize(texture2d<float,access::read> src [[texture(0)]],
+ device float* dst [[buffer(0)]],constant ResizeParameters&p [[buffer(1)]],
+ uint3 q [[thread_position_in_grid]]){
+ if(q.x>=p.dw||q.y>=p.dh||q.z>=3)return;
+ float sx=(float(q.x)+0.5f)*float(p.sw)/float(p.dw)-0.5f;
+ float sy=(float(q.y)+0.5f)*float(p.sh)/float(p.dh)-0.5f;
+ sx=clamp(sx,0.0f,float(p.sw-1));sy=clamp(sy,0.0f,float(p.sh-1));
+ uint x0=uint(sx),y0=uint(sy),x1=min(x0+1,p.sw-1),y1=min(y0+1,p.sh-1);
+ float fx=sx-float(x0),fy=sy-float(y0);
+ float a=src.read(uint2(x0,y0))[q.z],b=src.read(uint2(x1,y0))[q.z];
+ float c=src.read(uint2(x0,y1))[q.z],d=src.read(uint2(x1,y1))[q.z];
+ dst[q.z*p.dw*p.dh+q.y*p.dw+q.x]=mix(mix(a,b,fx),mix(c,d,fx),fy)*2.0f-1.0f;
+}
+kernel void buffer_resize(device const float*src [[buffer(0)]],device float*dst [[buffer(1)]],
+ constant ResizeParameters&p [[buffer(2)]],uint3 q [[thread_position_in_grid]]){
+ if(q.x>=p.dw||q.y>=p.dh||q.z>=3)return;
+ float sx=(float(q.x)+0.5f)*float(p.sw)/float(p.dw)-0.5f;
+ float sy=(float(q.y)+0.5f)*float(p.sh)/float(p.dh)-0.5f;
+ dst[q.z*p.dw*p.dh+q.y*p.dw+q.x]=bilinear(src,q.z,sx,sy,p.sw,p.sh);
+}
+kernel void pack(device const float*x0 [[buffer(0)]],device const float*x1 [[buffer(1)]],
+ device const float*x2 [[buffer(2)]],device float*dst [[buffer(3)]],
+ uint3 q [[thread_position_in_grid]]){
+ if(q.x>=384||q.y>=384||q.z>=105)return; uint image=q.z/3,channel=q.z%3;
+ device const float*src=x2;uint w=384,ox=0,oy=0;
+ if(image<25){src=x0;w=1536;ox=(image%5)*288;oy=(image/5)*288;}
+ else if(image<34){src=x1;w=768;uint n=image-25;ox=(n%3)*192;oy=(n/3)*192;}
+ dst[((image*3+channel)*384+q.y)*384+q.x]=src[(channel*w+oy+q.y)*w+ox+q.x];
+}
+struct FinalParameters{uint width,height;};
+kernel void final_depth(device const float*inv [[buffer(0)]],device const float*fov [[buffer(1)]],
+ texture2d<float,access::write>out [[texture(0)]],constant FinalParameters&p [[buffer(2)]],
+ uint2 q [[thread_position_in_grid]]){
+ if(q.x>=p.width||q.y>=p.height)return;
+ float sx=(float(q.x)+0.5f)*1536.0f/float(p.width)-0.5f;
+ float sy=(float(q.y)+0.5f)*1536.0f/float(p.height)-0.5f;
+ float inverse=bilinear(inv,0,sx,sy,1536,1536);
+ float focal=0.5f*float(p.width)/tan(0.5f*fov[0]*0.017453292519943295f);
+ float value=clamp(inverse*float(p.width)/focal,1.0e-4f,1.0e4f);
+ out.write(float4(1.0f/value),q);
+}
+)METAL";
+        NSError* error=nil;
+        id<MTLLibrary> library=[device_ newLibraryWithSource:
+            [NSString stringWithUTF8String:source_text] options:nil error:&error];
+        if(!library)throw std::runtime_error(error.localizedDescription.UTF8String?:
+            "could not compile Depth Pro Metal texture kernels");
+        auto make=[&](NSString* name){
+            id<MTLComputePipelineState> value=[device_ newComputePipelineStateWithFunction:
+                [library newFunctionWithName:name] error:&error];
+            if(!value)throw std::runtime_error(error.localizedDescription.UTF8String?:
+                "could not create Depth Pro Metal texture pipeline");
+            return value;
+        };
+        texture_resize_pipeline_=make(@"texture_resize");
+        buffer_resize_pipeline_=make(@"buffer_resize");
+        pack_pipeline_=make(@"pack");
+        final_pipeline_=make(@"final_depth");
+    }
+
     const Plan& get_plan(bool forced) {
         const PlanKey key{forced};
         auto found = plans_.find(key);
@@ -682,6 +904,10 @@ private:
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<PlanKey, Plan, PlanHash> plans_;
     std::mutex mutex_;
+    id<MTLComputePipelineState> texture_resize_pipeline_=nil;
+    id<MTLComputePipelineState> buffer_resize_pipeline_=nil;
+    id<MTLComputePipelineState> pack_pipeline_=nil;
+    id<MTLComputePipelineState> final_pipeline_=nil;
 };
 
 MetalExecutor::MetalExecutor(const ModelFile& model)
@@ -691,6 +917,11 @@ InferenceOutput MetalExecutor::infer(
     const float* rgb, std::uint32_t width, std::uint32_t height,
     float forced_fov_degrees) {
     return impl_->infer(rgb, width, height, forced_fov_degrees);
+}
+
+std::shared_ptr<ExternalJob> MetalExecutor::submit_texture(
+    const ExternalTextureRequest& request, float forced_fov_degrees) {
+    return impl_->submit_texture(request, forced_fov_degrees);
 }
 
 }  // namespace depth_pro_native

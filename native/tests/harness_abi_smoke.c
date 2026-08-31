@@ -16,7 +16,8 @@ int main(void) {
     CHECK(api.submit != NULL);
     CHECK(
         ibrh_get_api(
-            IBRH_MAKE_API_VERSION(2, 0), sizeof(api), &api) ==
+            IBRH_MAKE_API_VERSION(IBRH_API_VERSION_MAJOR + 1u, 0),
+            sizeof(api), &api) ==
         IBRH_ERROR_UNSUPPORTED_API);
 
     ibrh_capabilities capabilities = {0};
@@ -36,12 +37,21 @@ int main(void) {
             IBRH_CAP_GPU_RESOURCES | IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
             IBRH_CAP_GPU_RESIDENT_OUTPUT;
         CHECK((capabilities.flags & gpu_flags) == gpu_flags);
+#if defined(__APPLE__)
+        CHECK((capabilities.input_domain_mask &
+               (1ull << IBRH_RESOURCE_DOMAIN_METAL)) != 0u);
+        CHECK((capabilities.output_domain_mask &
+               (1ull << IBRH_RESOURCE_DOMAIN_METAL)) != 0u);
+        CHECK(capabilities.synchronization_mask ==
+              (1ull << IBRH_SYNC_METAL_SHARED_EVENT));
+#else
         CHECK((capabilities.input_domain_mask &
                (1ull << IBRH_RESOURCE_DOMAIN_D3D12)) != 0u);
         CHECK((capabilities.output_domain_mask &
                (1ull << IBRH_RESOURCE_DOMAIN_D3D12)) != 0u);
         CHECK(capabilities.synchronization_mask ==
               (1ull << IBRH_SYNC_D3D12_FENCE));
+#endif
         CHECK(capabilities.maximum_in_flight_jobs == 3u);
     } else {
         CHECK(capabilities.synchronization_mask == 0u);

@@ -3,6 +3,7 @@
 #include "graph_cpu.h"
 #include "model.h"
 #if defined(DEPTH_PRO_WITH_METAL)
+#include "depth_pro_internal.h"
 #include "metal_executor.h"
 #endif
 #if defined(DEPTH_PRO_WITH_VULKAN)
@@ -62,6 +63,48 @@ depth_pro_status protect(Function&& function) {
     }
 }
 }
+
+#if defined(DEPTH_PRO_WITH_METAL)
+namespace depth_pro_native {
+
+class ContextMetalExternalGpu final : public ExternalGpu {
+public:
+    ContextMetalExternalGpu(
+        depth_pro_context* context, float forced_fov_degrees)
+        : context_(context), forced_fov_degrees_(forced_fov_degrees) {
+        if (context_ == nullptr || context_->metal == nullptr)
+            throw std::invalid_argument("Depth Pro Metal context is unavailable");
+    }
+
+    ExternalGpuCapabilities capabilities() const override {
+        return {true, 0u, 3u};
+    }
+
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) override {
+        return context_->metal->submit_texture(request, forced_fov_degrees_);
+    }
+
+    void transfer_counters(
+        std::uint64_t& upload_bytes,
+        std::uint64_t& download_bytes) const override {
+        upload_bytes = 0u;
+        download_bytes = 0u;
+    }
+
+private:
+    depth_pro_context* context_;
+    float forced_fov_degrees_;
+};
+
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(
+    depth_pro_context* context, float forced_fov_degrees) {
+    return std::make_shared<ContextMetalExternalGpu>(
+        context, forced_fov_degrees);
+}
+
+}  // namespace depth_pro_native
+#endif
 
 extern "C" {
 

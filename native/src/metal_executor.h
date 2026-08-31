@@ -2,6 +2,7 @@
 
 #include "graph_cpu.h"
 #include "model.h"
+#include "external_gpu.h"
 
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,9 @@ public:
         const float* rgb,
         std::uint32_t width,
         std::uint32_t height,
+        float forced_fov_degrees);
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request,
         float forced_fov_degrees);
 
 private:
