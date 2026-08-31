@@ -500,6 +500,11 @@ public:
         create_texture_pipelines();
     }
 
+    void set_cache_path(const std::string& cache_path) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        cache_path_ = cache_path;
+    }
+
     InferenceOutput infer(
         const float* rgb, std::uint32_t width, std::uint32_t height,
         float forced_fov_degrees) {
@@ -871,13 +876,10 @@ kernel void final_depth(device const float*inv [[buffer(0)]],device const float*
 
     NSURL* cache_url(bool forced) const {
         if (@available(macOS 14.0, *)) {
-            NSArray<NSString*>* directories =
-                NSSearchPathForDirectoriesInDomains(
-                    NSCachesDirectory, NSUserDomainMask, YES);
-            if (directories.count == 0) return nil;
-            NSString* directory = [directories.firstObject
-                stringByAppendingPathComponent:
-                    @"DepthExtractor/DepthProMetalGraphCache-v5"];
+            if (cache_path_.empty()) return nil;
+            NSString* directory = [[NSString
+                stringWithUTF8String:cache_path_.c_str()]
+                stringByAppendingPathComponent:@"DepthProMetalGraphCache-v5"];
             if (![[NSFileManager defaultManager]
                     createDirectoryAtPath:directory
                     withIntermediateDirectories:YES
@@ -908,11 +910,15 @@ kernel void final_depth(device const float*inv [[buffer(0)]],device const float*
     id<MTLComputePipelineState> buffer_resize_pipeline_=nil;
     id<MTLComputePipelineState> pack_pipeline_=nil;
     id<MTLComputePipelineState> final_pipeline_=nil;
+    std::string cache_path_;
 };
 
 MetalExecutor::MetalExecutor(const ModelFile& model)
     : impl_(std::make_unique<Impl>(model)) {}
 MetalExecutor::~MetalExecutor() = default;
+void MetalExecutor::set_cache_path(const std::string& cache_path) {
+    impl_->set_cache_path(cache_path);
+}
 InferenceOutput MetalExecutor::infer(
     const float* rgb, std::uint32_t width, std::uint32_t height,
     float forced_fov_degrees) {

@@ -98,7 +98,11 @@ private:
 };
 
 std::shared_ptr<ExternalGpu> create_metal_external_gpu(
-    depth_pro_context* context, float forced_fov_degrees) {
+    depth_pro_context* context, float forced_fov_degrees,
+    const std::string& cache_path) {
+    if (!context || !context->metal)
+        throw std::invalid_argument("Depth Pro Metal context is unavailable");
+    context->metal->set_cache_path(cache_path);
     return std::make_shared<ContextMetalExternalGpu>(
         context, forced_fov_degrees);
 }
