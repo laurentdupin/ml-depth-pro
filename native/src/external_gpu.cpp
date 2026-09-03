@@ -9,6 +9,8 @@
 #include "vulkan.h"
 #include "inferbridge/native_harness_resource_lifetime.h"
 #include "inferbridge/native_harness_resource_cache.h"
+#include "inferbridge/native_harness_environment.h"
+#include "inferbridge/native_harness_profile.h"
 
 #include <array>
 #include <atomic>
@@ -112,7 +114,11 @@ public:
         // Deferred asynchronous recording cannot benchmark kernels by host
         // call duration. Select the conservative universally-correct kernel
         // shape and avoid launching the synchronous tuner's extra workloads.
-        gpu_model_.set_linear_tuning(false, false, 0u);
+        const bool scalar_linear =
+            inferbridge::native_harness::environment_flag_enabled(
+                "DPRO_DISABLE_FIXED_VECTORIZED_LINEAR");
+        gpu_model_.set_linear_tuning(
+            false, !scalar_linear, scalar_linear ? 0u : 8u);
         const std::vector<float> zeros(1024u, 0.0f);
         context_.upload(zero_, zeros.data(), zeros.size() * sizeof(float));
         if (forced_fov_degrees_ > 0.0f) {
@@ -143,6 +149,9 @@ public:
         (void)request;
         throw std::runtime_error("Depth Pro D3D12 interop is unavailable");
 #else
+        inferbridge::native::ProfileStage submission_profile(
+            "INFERBRIDGE_PROFILE_STAGES", "depth-pro",
+            "external_submission_record");
         if (!capabilities().available) {
             throw std::runtime_error(
                 "complete Depth Pro D3D12/Vulkan interop is unavailable");

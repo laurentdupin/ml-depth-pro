@@ -1,6 +1,8 @@
 #include "gpu_model.h"
 
+#include <inferbridge/native_harness_environment.h>
 #include <inferbridge/native_harness_precision.h>
+#include <inferbridge/native_harness_vulkan_initialization.h>
 
 #include <algorithm>
 #include <limits>
@@ -31,7 +33,14 @@ GpuModel::GpuModel(
         {context.supports_float16(), context.supports_packed_int8_dot()},
         context.supports_float16() ? inferbridge::native::Precision::fp16
                                    : inferbridge::native::Precision::fp32);
-    uses_half_weights_ = precision == inferbridge::native::Precision::fp16;
+    // DPROFMOD stores every source tensor as FP16. Expanding large weights to
+    // FP32 cannot restore information, doubles their device footprint, and can
+    // push the 1536px graph over the WDDM budget. The half-weight shaders
+    // unpack to float and retain FP32 accumulation, so native storage is also
+    // the lossless representation for FP32 compute.
+    uses_half_weights_ = precision != inferbridge::native::Precision::int8 &&
+        !inferbridge::native_harness::environment_flag_enabled(
+            "DPRO_DISABLE_NATIVE_WEIGHT_STORAGE");
     uses_int8_weights_ = precision == inferbridge::native::Precision::int8;
     tensors_.reserve(model.tensor_count());
     std::uint64_t uploaded_bytes = 0u;
@@ -50,8 +59,18 @@ GpuModel::GpuModel(
                 std::to_string(uploaded_buffers) + " buffers: " + error.what());
         }
     };
-    for (std::string_view name : model.tensor_names()) {
-        if (!load_fov_weights && name.rfind("fov.", 0) == 0) continue;
+    const std::vector<std::string_view> tensor_names = model.tensor_names();
+    inferbridge::native_harness::batch_vulkan_initialization_uploads(
+        context, tensor_names,
+        [&](std::string_view name) {
+            const TensorView& source = model.tensor(name);
+            // FP32 expansion is the largest single representation produced by
+            // this loader. Using it as the budget keeps retained staging
+            // allocations bounded for every precision.
+            return source.elements * sizeof(float);
+        },
+        [&](std::string_view name) {
+        if (!load_fov_weights && name.rfind("fov.", 0) == 0) return;
         const TensorView& source = model.tensor(name);
         if (source.elements >
             std::numeric_limits<std::size_t>::max() / sizeof(float)) {
@@ -116,7 +135,7 @@ GpuModel::GpuModel(
             throw std::runtime_error(
                 "duplicate GPU tensor name: " + std::string(name));
         }
-    }
+        });
 }
 
 const GpuTensor& GpuModel::tensor(std::string_view name) const {

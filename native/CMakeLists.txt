@@ -71,7 +71,7 @@ if(DEPTH_PRO_WITH_VULKAN)
             bilinear_align_true_image bmm bmm_score_half
             bmm_value_half conv2d conv2d8 conv2d_half conv2d8_half
             conv2d_pointwise_gemm conv2d_pointwise_gemm_half
-            conv2d8_tiled_half conv2d8_tiled16x8_half
+            conv2d8_tiled conv2d8_tiled_half conv2d8_tiled16x8_half
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             conv_transpose_gemm_half
             gelu layer_norm linear linear16 linear_half linear16_half

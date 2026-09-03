@@ -215,6 +215,7 @@ private:
     VulkanPipeline conv2d8_half_;
     VulkanPipeline conv2d_pointwise_gemm_;
     VulkanPipeline conv2d_pointwise_gemm_half_;
+    VulkanPipeline conv2d8_tiled_;
     VulkanPipeline conv2d8_tiled_half_;
     VulkanPipeline conv2d8_tiled16x8_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
