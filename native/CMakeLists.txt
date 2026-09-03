@@ -85,7 +85,8 @@ if(DEPTH_PRO_WITH_VULKAN)
             pyramid_patches write_depth_image)
         depth_pro_compile_shader(${SHADER})
     endforeach()
-    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled)
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled
+            layer_norm_parallel)
         inferbridge_compile_native_support_shader(
             NAME "${SHARED_SHADER}" PREFIX dpro
             GENERATED_DIR "${DEPTH_PRO_GENERATED_DIR}"

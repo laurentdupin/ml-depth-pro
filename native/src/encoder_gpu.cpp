@@ -1,5 +1,7 @@
 #include "encoder_gpu.h"
 
+#include "inferbridge/native_harness_environment.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -78,8 +80,15 @@ GpuEncoderOutput encoder_gpu(
     VulkanBuffer next = context.create_device_buffer(token_bytes);
     VulkanBuffer normalized = context.create_device_buffer(token_bytes);
     VulkanBuffer branch = context.create_device_buffer(token_bytes);
-    VulkanBuffer qkv = context.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden = context.create_device_buffer(token_bytes * 4);
+    // QKV is dead before the MLP hidden projection is produced. Reuse the
+    // larger allocation instead of retaining another 3x-token scratch buffer.
+    const bool alias_qkv =
+        inferbridge::native_harness::scratch_aliasing_enabled();
+    VulkanBuffer qkv_storage = alias_qkv
+        ? VulkanBuffer{}
+        : context.create_device_buffer(token_bytes * 3);
+    VulkanBuffer& qkv = alias_qkv ? hidden : qkv_storage;
     VulkanBuffer scores = context.create_device_buffer(
         std::uint64_t(batches) * heads * tokens * tokens *
         sizeof(float));

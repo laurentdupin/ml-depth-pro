@@ -24,6 +24,7 @@
 #include "conv_transpose_gemm_half_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
+#include "layer_norm_parallel_spv.h"
 #include "linear_spv.h"
 #include "linear16_spv.h"
 #include "linear_half_spv.h"
@@ -92,6 +93,9 @@ void require_half_elements(
 
 VulkanOperators::VulkanOperators(VulkanContext& context)
     : context_(context),
+      preserve_scalar_layer_norm_order_(
+          inferbridge::native::requested_precision() ==
+          inferbridge::native::Precision::int8),
       linear_(context.create_pipeline(
           dpro_linear_spv, dpro_linear_spv_size, 4, 12)),
       linear16_(context.create_pipeline(
@@ -150,6 +154,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_gelu_spv, dpro_gelu_spv_size, 2, 8)),
       layer_norm_(context.create_pipeline(
           dpro_layer_norm_spv, dpro_layer_norm_spv_size, 4, 12)),
+      layer_norm_parallel_(context.create_pipeline(
+          dpro_layer_norm_parallel_spv,
+          dpro_layer_norm_parallel_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
           dpro_add_scaled_spv, dpro_add_scaled_spv_size, 4, 12)),
       bmm_(context.create_pipeline(
@@ -316,6 +323,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     }
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
+    layer_norm_parallel_.set_debug_name("layer_norm_parallel");
     add_scaled_.set_debug_name("add_scaled");
     bmm_.set_debug_name("bmm");
     bmm_score_half_.set_debug_name("bmm_score_half");
@@ -636,8 +644,15 @@ void VulkanOperators::layer_norm(
         std::uint32_t columns;
         float epsilon;
     } parameters{rows, columns, epsilon};
+    const bool optimized =
+        !inferbridge::native_harness::environment_flag_enabled(
+            "INFERBRIDGE_DISABLE_PARALLEL_LAYER_NORM");
+    VulkanPipeline& pipeline =
+        optimized && !preserve_scalar_layer_norm_order_
+        ? layer_norm_parallel_
+        : layer_norm_;
     context_.dispatch(
-        layer_norm_,
+        pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
