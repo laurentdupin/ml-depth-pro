@@ -31,7 +31,7 @@ const VulkanBuffer& fp32(
 const VulkanBuffer& weight(
     const GpuModel& model, const std::string& name) {
     const GpuTensor& tensor = model.tensor(name);
-    const VulkanBuffer& result = model.uses_half_weights()
+    const VulkanBuffer& result = tensor.half_buffer.handle() != VK_NULL_HANDLE
         ? tensor.half_buffer : tensor.buffer;
     if (result.handle() == VK_NULL_HANDLE) {
         throw std::runtime_error("expected GPU weight: " + name);
@@ -52,9 +52,11 @@ void linear_model(
             tensor.int8_scales, fp32(model, bias_name), rows,
             input_columns, output_columns, gelu);
     } else {
+        const bool half_weight =
+            tensor.half_buffer.handle() != VK_NULL_HANDLE;
         operators.linear(output, input, weight(model, weight_name),
             fp32(model, bias_name), rows, input_columns, output_columns,
-            gelu, model.linear_block16(), model.uses_half_weights(),
+            gelu, model.linear_block16(), half_weight,
             model.linear_vectorized(), model.linear_vector_tile());
     }
 }
@@ -119,14 +121,18 @@ GpuEncoderOutput encoder_gpu(
             std::uint32_t vector_tile;
             std::array<double, 3> samples{};
         };
-        std::array<Candidate, 5> candidates{{
+        std::array<Candidate, 6> candidates{{
             {false, false, 0, {}},
             {true, false, 0, {}},
             {false, true, 4, {}},
             {false, true, 8, {}},
             {false, true, 16, {}},
+            {false, true, 24, {}},
         }};
         const auto run = [&](const Candidate& candidate) {
+            if (candidate.vector_tile == 24 && !model.uses_half_weights()) {
+                return std::numeric_limits<double>::max();
+            }
             const auto start = std::chrono::steady_clock::now();
             operators.linear(
                 qkv, normalized,

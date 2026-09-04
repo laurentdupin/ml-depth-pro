@@ -477,6 +477,10 @@ public:
         return submission_->complete() ? ExternalJobState::complete :
             ExternalJobState::running;
     }
+    void wait_execution() const override {
+        while (!submission_->complete())
+            [NSThread sleepForTimeInterval:0.001];
+    }
     void cancel() override { submission_->cancel(); }
 private:
     std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;

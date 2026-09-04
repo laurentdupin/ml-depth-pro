@@ -1,4 +1,6 @@
 #version 450 core
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
@@ -8,7 +10,7 @@ layout(set = 0, binding = 1, std430) readonly buffer Input {
     float data[];
 } input_buffer;
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
-    uint data[];
+    float16_t data[];
 } weight_buffer;
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
@@ -31,9 +33,7 @@ layout(push_constant) uniform Parameters {
 } parameters;
 
 float read_weight(uint index) {
-    const vec2 values =
-        unpackHalf2x16(weight_buffer.data[index >> 1]);
-    return (index & 1) == 0 ? values.x : values.y;
+    return float(weight_buffer.data[index]);
 }
 
 shared float spatial_tile[1440];

@@ -104,7 +104,9 @@ GpuModel::GpuModel(
                 quantized.packed.size() * sizeof(std::uint32_t));
             upload(name, destination.int8_scales, quantized.scales.data(),
                 quantized.scales.size() * sizeof(float));
-        } else if (is_large_weight(name) && uses_half_weights_) {
+        } else if (is_large_weight(name) &&
+            (uses_half_weights_ ||
+             (uses_int8_weights_ && source.rank != 2))) {
             const std::size_t packed_bytes =
                 static_cast<std::size_t>((source.elements + 1) / 2) *
                 sizeof(std::uint32_t);

@@ -101,7 +101,7 @@ std::vector<float> crop_host(
 const VulkanBuffer& weight(
     const GpuModel& model, const std::string& name) {
     const GpuTensor& tensor = model.tensor(name);
-    const VulkanBuffer& result = model.uses_half_weights()
+    const VulkanBuffer& result = tensor.half_buffer.handle() != VK_NULL_HANDLE
         ? tensor.half_buffer : tensor.buffer;
     if (result.handle() == VK_NULL_HANDLE) {
         throw std::runtime_error("expected GPU weight: " + name);
@@ -131,9 +131,11 @@ void linear_model(
             tensor.int8_scales, value(model, bias_name), rows,
             input_columns, output_columns);
     } else {
+        const bool half_weight =
+            tensor.half_buffer.handle() != VK_NULL_HANDLE;
         operators.linear(output, input, weight(model, weight_name),
             value(model, bias_name), rows, input_columns, output_columns,
-            false, true, model.uses_half_weights());
+            false, true, half_weight);
     }
 }
 
@@ -155,6 +157,8 @@ Feature conv(
         static_cast<std::uint32_t>(shape.dimensions[0]);
     const std::uint32_t kernel =
         static_cast<std::uint32_t>(shape.dimensions[2]);
+    const bool half_weight =
+        shape.half_buffer.handle() != VK_NULL_HANDLE;
     const std::uint32_t output_height =
         (input.height + 2 * padding - kernel) / stride + 1;
     const std::uint32_t output_width =
@@ -169,7 +173,7 @@ Feature conv(
         bias_name.empty() ? zero : value(model, bias_name),
         input.width, input.height, input.channels, output_channels,
         kernel, stride, padding, !bias_name.empty(), true,
-        model.uses_half_weights());
+        half_weight);
     return output;
 }
 
@@ -189,6 +193,8 @@ Feature deconv(
         static_cast<std::uint32_t>(shape.dimensions[1]);
     const std::uint32_t kernel =
         static_cast<std::uint32_t>(shape.dimensions[2]);
+    const bool half_weight =
+        shape.half_buffer.handle() != VK_NULL_HANDLE;
     Feature output{
         context.create_device_buffer(
             elements(
@@ -199,7 +205,7 @@ Feature deconv(
         output.buffer, input.buffer, weight(model, weight_name),
         bias_name.empty() ? zero : value(model, bias_name),
         input.width, input.height, input.channels, output_channels,
-        kernel, model.uses_half_weights());
+        kernel, half_weight);
     return output;
 }
 

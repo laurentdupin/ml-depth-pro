@@ -36,6 +36,7 @@ class ExternalJob {
 public:
     virtual ~ExternalJob() = default;
     virtual ExternalJobState state() const = 0;
+    virtual void wait_execution() const = 0;
     virtual void cancel() = 0;
 };
 

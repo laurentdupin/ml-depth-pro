@@ -20,6 +20,7 @@
 #include "conv2d8_tiled_half_spv.h"
 #include "conv2d8_tiled16x8_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
+#include "conv_transpose_nonoverlap4_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
 #include "conv_transpose_gemm_half_spv.h"
 #include "gelu_spv.h"
@@ -35,7 +36,9 @@
 #include "linear_vec8_half_spv.h"
 #include "linear_vec16_spv.h"
 #include "linear_vec16_half_spv.h"
+#include "linear_vec_rows24_half_spv.h"
 #include "linear_int8_tiled_spv.h"
+#include "linear_int8_tiled16_spv.h"
 #include "quantize_rows_int8_spv.h"
 #include "inferbridge/native_harness_precision.h"
 #include "prepare_tokens_spv.h"
@@ -125,6 +128,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       linear_vec16_half_(context.create_pipeline(
           dpro_linear_vec16_half_spv,
           dpro_linear_vec16_half_spv_size, 4, 12)),
+      linear_vec_rows24_half_(
+          context.supports_float16()
+          ? context.create_pipeline(
+                dpro_linear_vec_rows24_half_spv,
+                dpro_linear_vec_rows24_half_spv_size, 4, 12)
+          : VulkanPipeline{}),
       quantize_rows_int8_(
           context.supports_packed_int8_dot() &&
               inferbridge::native::requested_precision() ==
@@ -149,6 +158,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
                   inferbridge::native::Precision::int8
           ? context.create_pipeline(dpro_linear_int8_tiled_spv,
                 dpro_linear_int8_tiled_spv_size, 6, 28)
+          : VulkanPipeline{}),
+      linear_int8_tiled16_(
+          context.supports_packed_int8_dot() &&
+              inferbridge::native::requested_precision() ==
+                  inferbridge::native::Precision::int8
+          ? context.create_pipeline(dpro_linear_int8_tiled16_spv,
+                dpro_linear_int8_tiled16_spv_size, 6, 28)
           : VulkanPipeline{}),
       gelu_(context.create_pipeline(
           dpro_gelu_spv, dpro_gelu_spv_size, 2, 8)),
@@ -249,14 +265,20 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dpro_conv2d8_tiled_half_spv_size,
           4,
           56)),
-      conv2d8_tiled16x8_half_(context.create_pipeline(
-          dpro_conv2d8_tiled16x8_half_spv,
-          dpro_conv2d8_tiled16x8_half_spv_size,
-          4,
-          56)),
+      conv2d8_tiled16x8_half_(
+          context.supports_float16()
+          ? context.create_pipeline(
+                dpro_conv2d8_tiled16x8_half_spv,
+                dpro_conv2d8_tiled16x8_half_spv_size, 4, 56)
+          : VulkanPipeline{}),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dpro_conv_transpose_nonoverlap_spv,
           dpro_conv_transpose_nonoverlap_spv_size,
+          4,
+          32)),
+      conv_transpose_nonoverlap4_(context.create_pipeline(
+          dpro_conv_transpose_nonoverlap4_spv,
+          dpro_conv_transpose_nonoverlap4_spv_size,
           4,
           32)),
       conv_transpose_nonoverlap_half_(context.create_pipeline(
@@ -315,11 +337,16 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_vec8_half_.set_debug_name("linear_vec8_half");
     linear_vec16_.set_debug_name("linear_vec16");
     linear_vec16_half_.set_debug_name("linear_vec16_half");
+    if (context.supports_float16()) {
+        linear_vec_rows24_half_.set_debug_name(
+            "linear_vec_rows24_half");
+    }
     if (context.supports_packed_int8_dot() &&
         inferbridge::native::requested_precision() ==
             inferbridge::native::Precision::int8) {
         quantize_rows_int8_.set_debug_name("quantize_rows_int8");
         linear_int8_tiled_.set_debug_name("linear_int8_tiled");
+        linear_int8_tiled16_.set_debug_name("linear_int8_tiled16");
     }
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
@@ -353,6 +380,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "conv2d8_tiled16x8_half");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
+    conv_transpose_nonoverlap4_.set_debug_name(
+        "conv_transpose_nonoverlap4");
     conv_transpose_nonoverlap_half_.set_debug_name(
         "conv_transpose_nonoverlap_half");
     conv_transpose_gemm_half_.set_debug_name(
@@ -524,7 +553,7 @@ void VulkanOperators::linear_int8(
         &input_columns, sizeof(input_columns), rows);
     const std::uint32_t parameters[7] = {
         rows, input_columns, output_columns, 0u, output_columns, 0u, 1u};
-    context_.dispatch(linear_int8_tiled_,
+    context_.dispatch(rows >= 32u ? linear_int8_tiled16_ : linear_int8_tiled_,
         {&output, &packed_input, &packed_weight, &input_scales,
          &weight_scales, &bias}, parameters, sizeof(parameters),
         divide_up(output_columns, 64u), divide_up(rows, 56u));
@@ -580,7 +609,9 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     VulkanPipeline& pipeline = vectorized
-        ? (vector_tile == 16
+        ? (vector_tile == 24
+            ? linear_vec_rows24_half_
+            : vector_tile == 16
             ? (half_weight ? linear_vec16_half_ : linear_vec16_)
             : (vector_tile == 8
                 ? (half_weight ? linear_vec8_half_ : linear_vec8_)
@@ -598,7 +629,7 @@ void VulkanOperators::linear(
             ? divide_up(divide_up(output_columns, 4), 16)
             : divide_up(divide_up(output_columns, 4), 8),
         vectorized
-            ? divide_up(divide_up(rows, 7), 8)
+            ? divide_up(rows, vector_tile == 24 ? 24 : 56)
             : divide_up(divide_up(rows, 4), 8));
     if (gelu) {
         struct GeluParameters {
@@ -1135,7 +1166,9 @@ void VulkanOperators::conv2d(
                 : conv2d_pointwise_gemm_)
             : (tiled
                 ? (half_weight
-                    ? conv2d8_tiled16x8_half_
+                    ? (context_.supports_float16()
+                        ? conv2d8_tiled16x8_half_
+                        : conv2d8_tiled_half_)
                     : conv2d8_tiled_)
             : (half_weight
                 ? (block8 ? conv2d8_half_ : conv2d_half_)
@@ -1148,7 +1181,9 @@ void VulkanOperators::conv2d(
             pointwise
                 ? divide_up(output_width * row_count, 32)
                 : divide_up(
-                    output_width, tiled && half_weight ? 16 : 8),
+                    output_width,
+                    tiled && half_weight && context_.supports_float16()
+                        ? 16 : 8),
             pointwise
                 ? divide_up(output_channels, 32)
                 : divide_up(row_count, 8),
@@ -1262,13 +1297,13 @@ void VulkanOperators::conv_transpose_nonoverlap(
         context_.dispatch(
             half_weight
                 ? conv_transpose_nonoverlap_half_
-                : conv_transpose_nonoverlap_,
+                : conv_transpose_nonoverlap4_,
             {&output, &input, &weight, &bias},
             &parameters,
             sizeof(parameters),
             divide_up(output_width, 8),
             divide_up(parameters.output_y_count, 8),
-            output_channels * batches);
+            divide_up(output_channels, 4) * batches);
     }
 }
 

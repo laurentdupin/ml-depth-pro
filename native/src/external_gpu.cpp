@@ -33,6 +33,8 @@ namespace {
 
 #if defined(_WIN32)
 using Microsoft::WRL::ComPtr;
+// One graph saturates the executor. Queueing look-ahead work only retains
+// stale frames and can race imported-resource reuse before it retires.
 constexpr std::uint32_t kMaxInFlightJobs = 3u;
 
 void check_hresult(HRESULT result, const char* operation) {
@@ -88,6 +90,7 @@ public:
         completed_.store(true);
         return ExternalJobState::complete;
     }
+    void wait_execution() const override { submission_.wait(); }
     void cancel() override { cancelled_.store(true); }
 private:
     std::shared_ptr<ExternalGpu> owner_;

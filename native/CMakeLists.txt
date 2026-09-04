@@ -72,11 +72,13 @@ if(DEPTH_PRO_WITH_VULKAN)
             bmm_value_half conv2d conv2d8 conv2d_half conv2d8_half
             conv2d_pointwise_gemm conv2d_pointwise_gemm_half
             conv2d8_tiled conv2d8_tiled_half conv2d8_tiled16x8_half
-            conv_transpose_nonoverlap conv_transpose_nonoverlap_half
+            conv_transpose_nonoverlap conv_transpose_nonoverlap4
+            conv_transpose_nonoverlap_half
             conv_transpose_gemm_half
             gelu layer_norm linear linear16 linear_half linear16_half
             linear_vec4 linear_vec4_half linear_vec8 linear_vec8_half
-            linear_vec16 linear_vec16_half
+            linear_vec16 linear_vec16_half linear_vec_rows24_half
+            linear_int8_tiled16
             prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim
             softmax_lastdim_half prepare_tokens16 tokens_to_nchw
