@@ -360,3 +360,5 @@ depth_pro_status DEPTH_PRO_CALL depth_pro_infer_bgra8_f32(
 }
 
 }
+
+#include "linux_capture.inl"
