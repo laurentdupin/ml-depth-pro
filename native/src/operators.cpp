@@ -34,7 +34,6 @@
 #include "linear_vec4_half_spv.h"
 #include "linear_vec8_spv.h"
 #include "linear_vec8_half_spv.h"
-#include "linear_vec8_half_gelu_spv.h"
 #include "linear_vec16_spv.h"
 #include "linear_vec16_half_spv.h"
 #include "linear_vec_rows24_half_spv.h"
@@ -58,7 +57,6 @@
 #include "reciprocal_depth_spv.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -101,14 +99,6 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       preserve_scalar_layer_norm_order_(
           inferbridge::native::requested_precision() ==
           inferbridge::native::Precision::int8),
-      fc1_gelu_epilogue_enabled_(
-          inferbridge::native::requested_precision() ==
-              inferbridge::native::Precision::fp32 &&
-          inferbridge::native_harness::environment_flag_enabled(
-              "DPRO_ENABLE_FC1_GELU_EPILOGUE")),
-      trace_fc1_gelu_path_(
-          inferbridge::native_harness::environment_flag_enabled(
-              "DPRO_TRACE_FC1_GELU_EPILOGUE")),
       linear_(context.create_pipeline(
           dpro_linear_spv, dpro_linear_spv_size, 4, 12)),
       linear16_(context.create_pipeline(
@@ -132,11 +122,6 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       linear_vec8_half_(context.create_pipeline(
           dpro_linear_vec8_half_spv,
           dpro_linear_vec8_half_spv_size, 4, 12)),
-      linear_vec8_half_gelu_(
-          fc1_gelu_epilogue_enabled_
-          ? context.create_pipeline(dpro_linear_vec8_half_gelu_spv,
-                dpro_linear_vec8_half_gelu_spv_size, 4, 12)
-          : VulkanPipeline{}),
       linear_vec16_(context.create_pipeline(
           dpro_linear_vec16_spv,
           dpro_linear_vec16_spv_size, 4, 12)),
@@ -350,9 +335,6 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_vec4_half_.set_debug_name("linear_vec4_half");
     linear_vec8_.set_debug_name("linear_vec8");
     linear_vec8_half_.set_debug_name("linear_vec8_half");
-    if (fc1_gelu_epilogue_enabled_) {
-        linear_vec8_half_gelu_.set_debug_name("linear_vec8_half_gelu");
-    }
     linear_vec16_.set_debug_name("linear_vec16");
     linear_vec16_half_.set_debug_name("linear_vec16_half");
     if (context.supports_float16()) {
@@ -626,25 +608,7 @@ void VulkanOperators::linear(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
-    // E4 is deliberately limited to the shipping FP32/native-half FC1
-    // selection. Other precisions, tiles, shapes and non-GELU linears retain
-    // the original kernels and separate activation pass.
-    const bool fc1_shape = gelu && input_columns == 1024u &&
-        output_columns == 4096u;
-    const bool fuse_gelu = fc1_gelu_epilogue_enabled_ && fc1_shape &&
-        half_weight && vectorized && vector_tile == 8u;
-    if (fc1_shape && trace_fc1_gelu_path_ && !fc1_gelu_path_reported_) {
-        std::fprintf(stderr,
-            "DPRO_FC1_GELU_PATH kernel=%s rows=%u input=%u output=%u "
-            "half_weight=%u vectorized=%u vector_tile=%u\n",
-            fuse_gelu ? "linear_vec8_half_gelu" : "original-plus-gelu",
-            rows, input_columns, output_columns,
-            unsigned(half_weight), unsigned(vectorized), vector_tile);
-        fc1_gelu_path_reported_ = true;
-    }
-    VulkanPipeline& pipeline = fuse_gelu
-        ? linear_vec8_half_gelu_
-        : vectorized
+    VulkanPipeline& pipeline = vectorized
         ? (vector_tile == 24
             ? linear_vec_rows24_half_
             : vector_tile == 16
@@ -667,7 +631,7 @@ void VulkanOperators::linear(
         vectorized
             ? divide_up(rows, vector_tile == 24 ? 24 : 56)
             : divide_up(divide_up(rows, 4), 8));
-    if (gelu && !fuse_gelu) {
+    if (gelu) {
         struct GeluParameters {
             std::uint32_t count;
             std::uint32_t offset;
