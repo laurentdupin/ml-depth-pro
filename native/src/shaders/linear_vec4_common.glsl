@@ -126,11 +126,30 @@ void main() {
         for (uint column = 0; column < 4; ++column) {
             const uint output_column = column_base + column;
             if (output_column < parameters.output_columns) {
+#if defined(FC1_GELU_EPILOGUE)
+                // Preserve gelu.glsl's FP32 expression and operation order
+                // after the existing linear accumulation and bias addition.
+                const float value = sums[row][column] +
+                    bias_buffer.data[output_column];
+                const float x = value * 0.7071067811865475244;
+                const float absolute_x = abs(x);
+                const float t = 1.0 / (1.0 + 0.3275911 * absolute_x);
+                const float polynomial =
+                    (((((1.061405429 * t - 1.453152027) * t) +
+                        1.421413741) * t - 0.284496736) * t +
+                        0.254829592) * t;
+                const float erf_value = sign(x) *
+                    (1.0 - polynomial * exp(-absolute_x * absolute_x));
+                output_buffer.data[
+                    output_row * parameters.output_columns +
+                    output_column] = 0.5 * value * (1.0 + erf_value);
+#else
                 output_buffer.data[
                     output_row * parameters.output_columns +
                     output_column] =
                     sums[row][column] +
                     bias_buffer.data[output_column];
+#endif
             }
         }
     }

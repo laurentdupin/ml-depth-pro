@@ -77,6 +77,7 @@ if(DEPTH_PRO_WITH_VULKAN)
             conv_transpose_gemm_half
             gelu layer_norm linear linear16 linear_half linear16_half
             linear_vec4 linear_vec4_half linear_vec8 linear_vec8_half
+            linear_vec8_half_gelu
             linear_vec16 linear_vec16_half linear_vec_rows24_half
             linear_int8_tiled16
             prepare_tokens position_bicubic project_tokens
@@ -236,6 +237,17 @@ if(BUILD_TESTING)
             include src "${DEPTH_PRO_GENERATED_DIR}")
         target_link_libraries(
             depth_pro_gpu_encoder_probe PRIVATE Vulkan::Vulkan)
+        add_executable(
+            depth_pro_fc1_gelu_probe
+            tools/fc1_gelu_probe.cpp
+            src/model.cpp src/vulkan.cpp src/operators.cpp
+            src/gpu_model.cpp src/encoder_gpu.cpp
+            ${DEPTH_PRO_SHADER_HEADERS})
+        target_include_directories(
+            depth_pro_fc1_gelu_probe PRIVATE
+            include src "${DEPTH_PRO_GENERATED_DIR}")
+        target_link_libraries(
+            depth_pro_fc1_gelu_probe PRIVATE Vulkan::Vulkan)
     endif()
 endif()
 

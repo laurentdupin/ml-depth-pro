@@ -183,6 +183,9 @@ public:
 private:
     VulkanContext& context_;
     bool preserve_scalar_layer_norm_order_ = false;
+    bool fc1_gelu_epilogue_enabled_ = false;
+    bool trace_fc1_gelu_path_ = false;
+    bool fc1_gelu_path_reported_ = false;
     inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
     VulkanPipeline linear_;
     VulkanPipeline linear16_;
@@ -192,6 +195,7 @@ private:
     VulkanPipeline linear_vec4_half_;
     VulkanPipeline linear_vec8_;
     VulkanPipeline linear_vec8_half_;
+    VulkanPipeline linear_vec8_half_gelu_;
     VulkanPipeline linear_vec16_;
     VulkanPipeline linear_vec16_half_;
     VulkanPipeline linear_vec_rows24_half_;
