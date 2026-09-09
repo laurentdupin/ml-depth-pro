@@ -608,6 +608,14 @@ void VulkanOperators::linear(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
+#if defined(__linux__) && !defined(__ANDROID__)
+    // The rows24 shader uses native FP16 arithmetic, unlike the packed-weight
+    // FP32 kernels. Its pipeline is absent on devices such as Pascal even when
+    // the model retains its original half-precision weights.
+    if (vector_tile == 24 && (!half_weight || !context_.supports_float16())) {
+        vector_tile = 16;
+    }
+#endif
     VulkanPipeline& pipeline = vectorized
         ? (vector_tile == 24
             ? linear_vec_rows24_half_
