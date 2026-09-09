@@ -354,6 +354,16 @@ private:
                 // queued jobs cancellable, but never overlap their Vulkan
                 // working sets merely because the transport owns three slots.
                 native->wait_execution();
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_job.reset();
+                }
+                // Retire the transient graph on its owner thread before the
+                // next graph allocates memory. Polling must never do this work.
+                native.reset();
+                job->gpu_admission.reset();
+                job->gpu_state.store(job->cancel_requested.load() ?
+                    IBRH_JOB_CANCELLED : IBRH_JOB_COMPLETE);
             } catch (const std::exception& error) {
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
@@ -365,6 +375,15 @@ private:
             } catch (...) {
                 job->gpu_state.store(IBRH_JOB_FAILED);
             }
+            // Failed/cancelled executions must also relinquish GPU resources
+            // here, before the worker can start another allocation-heavy graph.
+            std::shared_ptr<depth_pro_native::ExternalJob> retired;
+            {
+                std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                retired = std::move(job->gpu_job);
+            }
+            retired.reset();
+            job->gpu_admission.reset();
             release_job(job);
         }
     }
@@ -829,38 +848,8 @@ ibrh_result IBRH_CALL job_poll(
     *status = {};
     status->struct_size = sizeof(*status);
 #if defined(DEPTH_PRO_WITH_EXTERNAL_GPU)
-    if (job->gpu_admission) {
-        std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
-        {
-            std::lock_guard<std::mutex> lock(job->gpu_mutex);
-            gpu_job = job->gpu_job;
-        }
-        if (gpu_job) {
-            switch (gpu_job->state()) {
-                case depth_pro_native::ExternalJobState::running:
-                    status->state = IBRH_JOB_RUNNING; break;
-                case depth_pro_native::ExternalJobState::complete:
-                    status->state = IBRH_JOB_COMPLETE; break;
-                case depth_pro_native::ExternalJobState::cancelled:
-                    status->state = IBRH_JOB_CANCELLED; break;
-            }
-        } else {
-            status->state = job->gpu_state.load();
-        }
-        if (status->state == IBRH_JOB_COMPLETE ||
-            status->state == IBRH_JOB_CANCELLED ||
-            status->state == IBRH_JOB_FAILED) {
-            // Output leases deliberately retain the harness job so imported
-            // textures remain alive. The completed Vulkan submission owns the
-            // much larger transient graph, however, and must be retired before
-            // the next inference allocates its working set.
-            std::lock_guard<std::mutex> lock(job->gpu_mutex);
-            job->gpu_job.reset();
-            job->gpu_admission.reset();
-        }
-    } else {
-        status->state = IBRH_JOB_COMPLETE;
-    }
+    status->state = job->input_texture_handle ?
+        job->gpu_state.load() : IBRH_JOB_COMPLETE;
 #else
     status->state = IBRH_JOB_COMPLETE;
 #endif
@@ -876,21 +865,14 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job))
         return IBRH_OK;
-    std::shared_ptr<depth_pro_native::ExternalJob> gpu_job;
+    // Keep the native reference on the worker. Cancellation only flips its
+    // flag while holding the short publication lock.
     {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
-        gpu_job = job->gpu_job;
+        if (job->gpu_job) job->gpu_job->cancel();
     }
-    if (gpu_job) {
-        gpu_job->cancel();
-        job->gpu_state.store(IBRH_JOB_CANCELLED);
-        return IBRH_OK;
-    }
-    const uint32_t state = job->gpu_state.load();
-    if (state == IBRH_JOB_QUEUED || state == IBRH_JOB_RUNNING) {
-        job->gpu_state.store(IBRH_JOB_CANCELLED);
-        return IBRH_OK;
-    }
+    job->gpu_state.store(IBRH_JOB_CANCELLED);
+    return IBRH_OK;
 #endif
     return IBRH_ERROR_INVALID_STATE;
 }
