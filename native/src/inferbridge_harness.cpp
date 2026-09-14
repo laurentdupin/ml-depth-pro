@@ -1,3 +1,4 @@
+#include "inferbridge/native_harness_queue_priority.h"
 #include <inferbridge/native_harness_json.h>
 
 #include "inferbridge_harness.h"
@@ -520,6 +521,7 @@ ibrh_result IBRH_CALL model_load(
             "Depth Pro model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    const inferbridge::native_harness::ScopedQueuePriorityRequest queue_priority_scope(parameters);
     inferbridge::native::ScopedPrecisionRequest precision_request(
         inferbridge::native::precision_from_parameters_json(parameters));
     auto* model = new (std::nothrow) ibrh_model();
